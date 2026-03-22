@@ -33,7 +33,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'J': 'JOIN',
             'H': 'HATCH',
             'LO': 'LAYOFF',
-            'LN': 'LAYON'
+            'LN': 'LAYON',
+            'RR': 'RELOAD',
         }
 
         # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ (Mapping στο FreeCAD)
@@ -59,7 +60,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'JOIN': 'Draft_Join',
             'HATCH': 'Draft_Hatch',
             'LAYOFF': 'LAYOFF',
-            'LAYON': 'LAYON'
+            'LAYON': 'LAYON',
+            'RELOAD': lambda: App.RR(),
         }
         
         self.last_command = None 

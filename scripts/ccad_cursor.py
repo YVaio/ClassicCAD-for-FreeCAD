@@ -68,7 +68,7 @@ class ClassicCursor(QtWidgets.QWidget):
         busy = self.is_busy()
         
         cam_dir = view.getViewDirection()
-        is_ortho = any(abs(getattr(cam_dir, a)) > 0.999 for a in ['x', 'y', 'z'])
+        is_ortho = any(abs(getattr(cam_dir, a)) > 0.999999999 for a in ['x', 'y', 'z'])
         
         alpha = 150
         col_w = QtGui.QColor(255, 255, 255, alpha)
