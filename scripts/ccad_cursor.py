@@ -149,10 +149,16 @@ def setup():
 def tear_down():
     if hasattr(Gui, "ccad_cursor"):
         try:
+            # Σταμάτημα του timer αμέσως
             Gui.ccad_cursor.timer.stop()
+            # Επαναφορά του κέρσορα συστήματος
             if Gui.ccad_cursor._cursor_forced:
                 QtWidgets.QApplication.restoreOverrideCursor()
+            # Άμεση απόκρυψη και αποδέσμευση
             Gui.ccad_cursor.hide()
+            Gui.ccad_cursor.setParent(None) # Αποσύνδεση από το viewport
             Gui.ccad_cursor.deleteLater()
             del Gui.ccad_cursor
-        except: pass
+            App.Console.PrintLog("ClassicCAD Cursor: Reset Complete.\n")
+        except Exception as e:
+            App.Console.PrintLog(f"Cursor Tear-down failed: {str(e)}\n")

@@ -91,7 +91,7 @@ class ClassicCADWorkbench(Gui.Workbench):
             if mod_name in sys.modules:
                 module = sys.modules[mod_name]
                 if hasattr(module, "tear_down"):
-                    module.tear_down()
+                    module.tear_down() # Εδώ γίνεται το Reset
 
     def GetClassName(self): 
         return "Gui::PythonWorkbench"

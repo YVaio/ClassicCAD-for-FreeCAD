@@ -37,7 +37,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'RR': 'RELOAD',
         }
 
-        # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ
+        # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ (Mapping στο FreeCAD)
         self.commands = {
             'LINE': 'Draft_Line', 
             'CIRCLE': 'Draft_Circle', 
@@ -61,7 +61,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'HATCH': 'Draft_Hatch',
             'LAYOFF': 'LAYOFF',
             'LAYON': 'LAYON',
-            'RELOAD': lambda: App.RR(),
+            'RELOAD': 'RELOAD_CCAD',
         }
         
         self.last_command = None 
@@ -140,14 +140,26 @@ class ClassicConsole(QtWidgets.QDockWidget):
             self.input.clear()
             
             try:
+                if freecad_cmd == 'RELOAD_CCAD':
+                    self.history.append("<span style='color:#ffff55;'>Resetting & Reloading ClassicCAD...</span>")
+                    if hasattr(Gui, "ccad_global_active"):
+                        # 1. ΠΛΗΡΕΣ RESET: Καθαρισμός όλων των scripts
+                        Gui.ccad_global_active.Deactivated() 
+                        # 2. ΠΛΗΡΕΣ RELOAD: Επαναφόρτωση από το μηδέν
+                        Gui.ccad_global_active.Activated()
+                    
+                    self.input.clear()
+                    self.history.append("<span style='color:#55ff55;'>ClassicCAD is now Fresh.</span>")
+                    return
+
                 if freecad_cmd in ['LAYOFF', 'LAYON']:
                     if freecad_cmd == 'LAYOFF': ccad_layers.LAYOFF()
                     else: ccad_layers.LAYON()
                 else:
                     Gui.getMainWindow().setFocus()
                     Gui.runCommand(freecad_cmd)
-            except:
-                self.history.append("<span style='color:red;'>Command execution failed</span>")
+            except Exception as e:
+                self.history.append(f"<span style='color:red;'>Reload failed: {str(e)}</span>")
         else:
             if clean_input:
                 self.history.append(f"<span style='color:#ff5555;'>Unknown command: {clean_input}</span>")
