@@ -80,7 +80,7 @@ class SelectionManager:
 
             # Η τιμή που θέλουμε (AutoCAD Pickbox radius)
             # Δοκίμασε 15 για να δεις αν υπάρχει τεράστια διαφορά
-            target_radius = 15 
+            target_radius = 10 
 
             # 1. Ενημέρωση των παραμέτρων (για το μέλλον)
             param = App.ParamGet("User parameter:BaseApp/Preferences/View")
