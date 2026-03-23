@@ -1,52 +1,106 @@
 import FreeCAD as App
 import FreeCADGui as Gui
 from PySide6 import QtCore
+import Draft
 
-class LayerManager:
-    @staticmethod
-    def ensure_layer_zero(doc):
-        """Δημιουργεί το Layer 0 αν δεν υπάρχει"""
-        if not doc: return
+def get_active_layer(doc):
+    """Βρίσκει το ενεργό layer ή επιστρέφει το Layer 0 ως προεπιλογή"""
+    param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+    layer_name = param.GetString("CurrentLayer", "")
+    
+    if layer_name:
+        layer = doc.getObject(layer_name)
+        if layer: return layer
         
-        # Έλεγχος αν υπάρχει ήδη layer με label "0"
-        exists = False
-        for obj in doc.Objects:
-            if obj.Label == "0":
-                exists = True
+    # Αν δεν υπάρχει ενεργό, ψάχνουμε το Layer "0"
+    return next((o for o in doc.Objects if o.Label == "0" or o.Name == "Layer0"), None)
+
+class LayerZeroManager:
+    @staticmethod
+    def ensure_layer_zero_and_activate(doc):
+        if not doc: return
+            
+        # Πιο ευρύς έλεγχος για να μην δημιουργεί διπλά layers
+        l0 = None
+        for o in doc.Objects:
+            if o.Label == "0" or o.Name == "Layer0":
+                l0 = o
                 break
         
-        if not exists:
+        if not l0:
             try:
-                import Draft
-                # Δημιουργία layer
                 l0 = Draft.make_layer(name="Layer0")
                 l0.Label = "0"
-                # Λευκό χρώμα στο ViewObject (RGB 1,1,1)
-                if hasattr(l0, "ViewObject"):
+                if hasattr(l0, "ViewObject") and l0.ViewObject:
                     l0.ViewObject.LineColor = (1.0, 1.0, 1.0)
+                    l0.ViewObject.LineWidth = 2.0
                 doc.recompute()
-                print("ClassicCAD: Layer '0' created.")
+                App.Console.PrintLog("ClassicCAD: Layer '0' created.\n")
             except Exception as e:
-                print(f"ClassicCAD: Failed to create Layer 0: {e}")
+                App.Console.PrintError(f"ClassicCAD: Error creating Layer 0: {e}\n")
+                return
+
+        if l0:
+            try:
+                param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+                param.SetString("CurrentLayer", l0.Name)
+                if hasattr(Gui, "draftToolBar") and hasattr(Gui.draftToolBar, "layerUI"):
+                    Gui.draftToolBar.layerUI.update()
+            except: pass
 
 class DocumentObserver:
-    """Παρατηρητής για νέα έγγραφα"""
     def slotCreatedDocument(self, doc):
-        # Καθυστέρηση 2 δευτερολέπτων για να προλάβει να φορτώσει το Draft module
-        QtCore.QTimer.singleShot(2000, lambda: LayerManager.ensure_layer_zero(doc))
+        QtCore.QTimer.singleShot(2000, lambda: LayerZeroManager.ensure_layer_zero_and_activate(doc))
+
+    def slotCreatedObject(self, obj):
+        if not obj or not hasattr(obj, "Name"):
+            return
+            
+        # Αγνοούμε τη δημιουργία του ίδιου του layer ή άλλων groups για να μην έχουμε λούπες
+        if obj.Label == "0" or obj.Name.startswith("Layer") or "Group" in obj.TypeId:
+            return
+            
+        obj_name = obj.Name
+        QtCore.QTimer.singleShot(500, lambda: self.move_to_active_layer(obj_name))
+
+    def move_to_active_layer(self, obj_name):
+        doc = App.ActiveDocument
+        if not doc: return
+        obj = doc.getObject(obj_name)
+        if not obj: return
+        
+        # Έλεγχος αν το αντικείμενο ανήκει ήδη σε κάτι (π.χ. σε Group/Layer)
+        if hasattr(obj, "InList") and any(hasattr(p, "Group") for p in obj.InList):
+            return
+
+        active_layer = get_active_layer(doc)
+        if active_layer and hasattr(active_layer, "addObject"):
+            try:
+                active_layer.addObject(obj)
+            except Exception as e:
+                pass
 
 def setup():
-    """Αρχικοποίηση του module"""
-    # Σύνδεση του Observer
-    if not hasattr(Gui, "ccad_layer_observer"):
-        Gui.ccad_layer_observer = DocumentObserver()
-        App.addDocumentObserver(Gui.ccad_layer_observer)
-    
-    # Έλεγχος για το τρέχον ανοιχτό έγγραφο
-    if App.ActiveDocument:
-        LayerManager.ensure_layer_zero(App.ActiveDocument)
+    if hasattr(Gui, "ccad_layer_observer"):
+        try:
+            App.removeDocumentObserver(Gui.ccad_layer_observer)
+            del Gui.ccad_layer_observer
+        except: pass
 
-    print("ClassicCAD: Layer 0 Basic Initialization Active.")
+    mw = Gui.getMainWindow()
+    if mw:
+        old_tb = mw.findChild(QtCore.QObject, "ClassicCADLayerToolbar")
+        if old_tb:
+            mw.removeToolBar(old_tb)
+            old_tb.deleteLater()
+
+    Gui.ccad_layer_observer = DocumentObserver()
+    App.addDocumentObserver(Gui.ccad_layer_observer)
+
+    if App.ActiveDocument:
+        QtCore.QTimer.singleShot(500, lambda: LayerZeroManager.ensure_layer_zero_and_activate(App.ActiveDocument))
+
+    print("ClassicCAD: Smart Auto-Grouping to Active Layer Loaded.")
 
 if __name__ == "__main__":
     setup()

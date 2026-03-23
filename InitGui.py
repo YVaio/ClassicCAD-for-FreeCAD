@@ -37,7 +37,7 @@ class ClassicCADWorkbench(Gui.Workbench):
             "ccad_selection",
             "ccad_draft_tools",
             "ccad_layers",
-            "ccad_snaps",
+            #"ccad_snaps",
             "ccad_dev_tools"
         ]
         mod_path = os.path.join(App.getUserAppDataDir(), "Mod", "ClassicCAD", "scripts")
