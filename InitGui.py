@@ -87,11 +87,21 @@ class ClassicCADWorkbench(Gui.Workbench):
             silent_top_view()
 
     def Deactivated(self):
+        # 1. Βίαιο κλείσιμο Task Dialogs
+        try:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+        except: pass
+
+        # 2. Ασφαλές Reset των modules
         for mod_name in self.active_modules:
             if mod_name in sys.modules:
                 module = sys.modules[mod_name]
-                if hasattr(module, "tear_down"):
-                    module.tear_down() # Εδώ γίνεται το Reset
+                if module and hasattr(module, "tear_down"):
+                    try:
+                        module.tear_down()
+                    except Exception as e:
+                        App.Console.PrintLog(f"ClassicCAD: Silent skip on {mod_name} reset.\n")
 
     def GetClassName(self): 
         return "Gui::PythonWorkbench"

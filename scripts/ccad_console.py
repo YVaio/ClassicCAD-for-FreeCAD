@@ -35,6 +35,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'LO': 'LAYOFF',
             'LN': 'LAYON',
             'RR': 'RELOAD',
+            'RE': 'REGEN',
         }
 
         # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ (Mapping στο FreeCAD)
@@ -62,6 +63,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'LAYOFF': 'LAYOFF',
             'LAYON': 'LAYON',
             'RELOAD': 'RELOAD_CCAD',
+            'REGEN': 'REGEN_CCAD',
         }
         
         self.last_command = None 
@@ -140,26 +142,38 @@ class ClassicConsole(QtWidgets.QDockWidget):
             self.input.clear()
             
             try:
-                if freecad_cmd == 'RELOAD_CCAD':
-                    self.history.append("<span style='color:#ffff55;'>Resetting & Reloading ClassicCAD...</span>")
-                    if hasattr(Gui, "ccad_global_active"):
-                        # 1. ΠΛΗΡΕΣ RESET: Καθαρισμός όλων των scripts
-                        Gui.ccad_global_active.Deactivated() 
-                        # 2. ΠΛΗΡΕΣ RELOAD: Επαναφόρτωση από το μηδέν
-                        Gui.ccad_global_active.Activated()
-                    
+                # --- ΠΡΟΣΘΗΚΗ REGEN ---
+                if freecad_cmd == 'REGEN_CCAD':
+                    import ccad_dev_tools
+                    import importlib
+                    # Reload το module για να σιγουρευτούμε ότι παίρνει τις αλλαγές
+                    importlib.reload(ccad_dev_tools) 
+                    ccad_dev_tools.REGEN()
                     self.input.clear()
-                    self.history.append("<span style='color:#55ff55;'>ClassicCAD is now Fresh.</span>")
                     return
 
+                # --- ΥΠΑΡΧΟΝ RELOAD ---
+                if freecad_cmd == 'RELOAD_CCAD':
+                    self.history.append("<span style='color:#ffff55;'>System Resetting...</span>")
+                    Gui.Selection.clearSelection()
+                    active_wb = getattr(Gui, "ccad_global_active", None)
+                    if active_wb:
+                        active_wb.Deactivated()
+                        active_wb.Activated()
+                        self.history.append("<span style='color:#55ff55;'>ClassicCAD: Reloaded.</span>")
+                    self.input.clear()
+                    return
+
+                # --- ΛΟΙΠΕΣ ΕΝΤΟΛΕΣ (LAYOFF, κλπ) ---
                 if freecad_cmd in ['LAYOFF', 'LAYON']:
                     if freecad_cmd == 'LAYOFF': ccad_layers.LAYOFF()
                     else: ccad_layers.LAYON()
                 else:
+                    # Εδώ τρέχουν οι κανονικές εντολές του FreeCAD
                     Gui.getMainWindow().setFocus()
                     Gui.runCommand(freecad_cmd)
             except Exception as e:
-                self.history.append(f"<span style='color:red;'>Reload failed: {str(e)}</span>")
+                self.history.append(f"<span style='color:red;'>Command failed: {str(e)}</span>")
         else:
             if clean_input:
                 self.history.append(f"<span style='color:#ff5555;'>Unknown command: {clean_input}</span>")
