@@ -69,6 +69,46 @@ class AutoSelectionBlocker:
                         Gui.Control.closeDialog()
             except: pass
 
+class SelectionManager:
+    @staticmethod
+    def force_pick_radius():
+        """Επιβολή του PickRadius απευθείας στον Viewer του Coin3D"""
+        try:
+            view = Gui.activeView()
+            if not view:
+                return
+
+            # Η τιμή που θέλουμε (AutoCAD Pickbox radius)
+            # Δοκίμασε 15 για να δεις αν υπάρχει τεράστια διαφορά
+            target_radius = 15 
+
+            # 1. Ενημέρωση των παραμέτρων (για το μέλλον)
+            param = App.ParamGet("User parameter:BaseApp/Preferences/View")
+            if param.GetInt("PickSize") != target_radius:
+                param.SetInt("PickSize", target_radius)
+
+            # 2. Απευθείας επέμβαση στον Viewer
+            # Το FreeCAD 1.1 χρησιμοποιεί το SoQt / Quarter
+            viewer = view.getViewer()
+            if hasattr(viewer, "setPickRadius"):
+                viewer.setPickRadius(float(target_radius))
+            
+            # 3. Ενεργοποίηση Preselection (για να βλέπουμε το αποτέλεσμα)
+            param.SetBool("EnablePreselection", True)
+            # Έντονο Κίτρινο
+            param.SetUnsigned("PreselectionColor", 4294967040)
+
+        except:
+            pass
+
+class SelectionObserver(QtCore.QObject):
+    def __init__(self):
+        super().__init__()
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(SelectionManager.force_pick_radius)
+        # Έλεγχος κάθε 1 δευτερόλεπτο
+        self.timer.start(1000)
+
 # =========================================================
 # 2. CTRL+CLICK & SMART CLICK LOGIC
 # =========================================================
@@ -147,6 +187,17 @@ def setup():
         Gui.ccad_sel_logic = CCADSelectionLogic(target)
 
     print("ClassicCAD: One-Click Grips & Snappy Selection Active.")
+
+    if hasattr(Gui, "ccad_selection_observer"):
+        try:
+            Gui.ccad_selection_observer.timer.stop()
+            Gui.ccad_selection_observer.deleteLater()
+        except: pass
+
+    Gui.ccad_selection_observer = SelectionObserver()
+    SelectionManager.force_pick_radius()
+    
+    App.Console.PrintLog("ClassicCAD Selection: Brute Force PickRadius Active.\n")
 
 if __name__ == "__main__":
     setup()

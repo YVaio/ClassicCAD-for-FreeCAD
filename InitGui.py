@@ -23,7 +23,8 @@ def startup_classic_cad():
             "ccad_layers",
             "ccad_snaps",
             "ccad_cmd_line",
-            "ccad_dev_tools"
+            "ccad_dev_tools",
+            "ccad_environment"
         ]
 
         def __init__(self):
