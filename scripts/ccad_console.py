@@ -10,7 +10,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.setWindowTitle("COMMAND LINE")
         self.setTitleBarWidget(QtWidgets.QWidget()) 
         
-        # 1. ΠΡΟΤΕΡΑΙΟΤΗΤΕΣ (Aliases) - Όπως στο AutoCAD
+        # 1. ΠΡΟΤΕΡΑΙΟΤΗΤΕΣ (Aliases)
         self.shortcuts = {
             'L': 'LINE',
             'C': 'CIRCLE',
@@ -37,7 +37,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'RR': 'RELOAD',
         }
 
-        # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ (Mapping στο FreeCAD)
+        # 2. ΠΛΗΡΕΙΣ ΕΝΤΟΛΕΣ
         self.commands = {
             'LINE': 'Draft_Line', 
             'CIRCLE': 'Draft_Circle', 
@@ -76,7 +76,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.input = QtWidgets.QLineEdit()
         self.input.setStyleSheet("background:#1e1e1e; color:#fff; border:1px solid #333; font-family:'Consolas'; padding:4px; font-size:12px;")
         
-        # 3. Δημιουργία Λίστας Search με Hint: π.χ. "L (LINE)"
+        # 3. Δημιουργία Λίστας Search
         self.search_data = []
         for alias, full in self.shortcuts.items():
             self.search_data.append(f"{alias} ({full})")
@@ -97,6 +97,13 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.input.returnPressed.connect(self.execute)
         self.input.textChanged.connect(self.check_space)
 
+    def execute_draft_command(self, command_name):
+        try:
+            Gui.activateWorkbench("DraftWorkbench")
+            Gui.runCommand(command_name)
+        except Exception as e:
+            self.history.append(f"<span style='color:red;'>Error: {str(e)}</span>")
+
     def check_space(self, text):
         if text.endswith(" "):
             self.execute()
@@ -104,15 +111,21 @@ class ClassicConsole(QtWidgets.QDockWidget):
     def execute(self, force_repeat=False):
         raw_text = self.input.text().strip().upper()
         
+        # --- NEA ΛΟΓΙΚΗ AUTO-COMPLETE ---
         if not raw_text:
             if force_repeat and self.last_command:
                 raw_text = self.last_command
-            else:
-                completion = self.completer.currentCompletion().upper()
-                if completion: raw_text = completion
-                else: return
+            else: return
+        else:
+            # Αν αυτό που έγραψε ο χρήστης ΔΕΝ είναι ακριβώς εντολή ή alias, 
+            # τράβα την πρώτη πρόταση από τον completer
+            if raw_text not in self.shortcuts and raw_text not in self.commands:
+                # Επιβάλλουμε στον completer να βρει την τρέχουσα πρόταση για το κείμενο
+                self.completer.setCompletionPrefix(raw_text)
+                if self.completer.completionCount() > 0:
+                    raw_text = self.completer.currentCompletion().upper()
 
-        # Καθαρισμός του raw_text από την παρένθεση
+        # Καθαρισμός από παρενθέσεις π.χ. "L (LINE)" -> "L"
         clean_input = raw_text.split(' ')[0]
 
         # Μετατροπή Alias σε Full Command Name
@@ -150,19 +163,15 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress:
-            # Έλεγχος αν ο χρήστης γράφει σε κάποιο input field (π.χ. ΔX, ΔY)
             fw = QtWidgets.QApplication.focusWidget()
             is_input = isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox))
             
-            # 1. Αν πατήσει ESC
             if event.key() == QtCore.Qt.Key_Escape:
                 if self.input.hasFocus() and self.input.text():
                     self.input.clear()
                     return True
 
-            # 2. Αν πατήσει Enter ή Space
             if event.key() in [QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space]:
-                # ΑΝ ΕΙΝΑΙ ΣΕ INPUT FIELD (ΔX, ΔY), ΑΣΕ ΤΟ ENTER ΝΑ ΠΕΡΑΣΕΙ ΣΤΟ ΕΡΓΑΛΕΙΟ
                 if is_input and fw != self.input:
                     return False 
                 
@@ -170,7 +179,6 @@ class ClassicConsole(QtWidgets.QDockWidget):
                     return False
                 
                 if self.is_draft_active():
-                    # Στέλνουμε το Enter στο focus widget του Draft (Confirm point)
                     enter_evt = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
                     QtWidgets.QApplication.postEvent(QtWidgets.QApplication.focusWidget(), enter_evt)
                     return True
@@ -191,7 +199,6 @@ def setup():
     Gui.classic_console = ClassicConsole(mw)
     mw.addDockWidget(QtCore.Qt.BottomDockWidgetArea, Gui.classic_console)
     
-    # Εγκατάσταση του φίλτρου σε όλο το Application για να πιάνουμε το Space/Enter παντού
     QtWidgets.QApplication.instance().installEventFilter(Gui.classic_console)
     
     if hasattr(Gui, "ccad_shortcuts"):
@@ -200,7 +207,6 @@ def setup():
     
     def focus_and_type(char):
         fw = QtWidgets.QApplication.focusWidget()
-        # Αν ήδη γράφουμε κάπου (π.χ. ΔX), μην αλλάζεις το focus στην κονσόλα
         if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
             return
 
