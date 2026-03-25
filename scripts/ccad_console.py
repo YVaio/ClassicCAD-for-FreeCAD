@@ -57,7 +57,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'FILLET': 'Draft_Fillet',
             'ARRAY': 'Draft_Array',
             'ERASE': 'Std_Delete',
-            'EXPLODE': 'Draft_Explode',
+            'EXPLODE': 'Draft_Downgrade', # Επαναφορά σε Downgrade (Explode)
             'JOIN': 'Draft_Join',
             'HATCH': 'Draft_Hatch',
             'LAYOFF': 'LAYOFF',
@@ -78,7 +78,6 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.input = QtWidgets.QLineEdit()
         self.input.setStyleSheet("background:#1e1e1e; color:#fff; border:1px solid #333; font-family:'Consolas'; padding:4px; font-size:12px;")
         
-        # 3. Δημιουργία Λίστας Search
         self.search_data = []
         for alias, full in self.shortcuts.items():
             self.search_data.append(f"{alias} ({full})")
@@ -99,13 +98,6 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.input.returnPressed.connect(self.execute)
         self.input.textChanged.connect(self.check_space)
 
-    def execute_draft_command(self, command_name):
-        try:
-            Gui.activateWorkbench("DraftWorkbench")
-            Gui.runCommand(command_name)
-        except Exception as e:
-            self.history.append(f"<span style='color:red;'>Error: {str(e)}</span>")
-
     def check_space(self, text):
         if text.endswith(" "):
             self.execute()
@@ -113,27 +105,18 @@ class ClassicConsole(QtWidgets.QDockWidget):
     def execute(self, force_repeat=False):
         raw_text = self.input.text().strip().upper()
         
-        # --- NEA ΛΟΓΙΚΗ AUTO-COMPLETE ---
         if not raw_text:
             if force_repeat and self.last_command:
                 raw_text = self.last_command
             else: return
         else:
-            # Αν αυτό που έγραψε ο χρήστης ΔΕΝ είναι ακριβώς εντολή ή alias, 
-            # τράβα την πρώτη πρόταση από τον completer
             if raw_text not in self.shortcuts and raw_text not in self.commands:
-                # Επιβάλλουμε στον completer να βρει την τρέχουσα πρόταση για το κείμενο
                 self.completer.setCompletionPrefix(raw_text)
                 if self.completer.completionCount() > 0:
                     raw_text = self.completer.currentCompletion().upper()
 
-        # Καθαρισμός από παρενθέσεις π.χ. "L (LINE)" -> "L"
         clean_input = raw_text.split(' ')[0]
-
-        # Μετατροπή Alias σε Full Command Name
         cmd_name = self.shortcuts.get(clean_input, clean_input)
-        
-        # Μετατροπή Full Name σε FreeCAD Command
         freecad_cmd = self.commands.get(cmd_name)
 
         if freecad_cmd:
@@ -142,34 +125,43 @@ class ClassicConsole(QtWidgets.QDockWidget):
             self.input.clear()
             
             try:
-                # --- ΠΡΟΣΘΗΚΗ REGEN ---
                 if freecad_cmd == 'REGEN_CCAD':
                     import ccad_dev_tools
                     import importlib
-                    # Reload το module για να σιγουρευτούμε ότι παίρνει τις αλλαγές
                     importlib.reload(ccad_dev_tools) 
                     ccad_dev_tools.REGEN()
-                    self.input.clear()
                     return
 
-                # --- ΥΠΑΡΧΟΝ RELOAD ---
                 if freecad_cmd == 'RELOAD_CCAD':
-                    self.history.append("<span style='color:#ffff55;'>System Resetting...</span>")
-                    Gui.Selection.clearSelection()
-                    active_wb = getattr(Gui, "ccad_global_active", None)
-                    if active_wb:
-                        active_wb.Deactivated()
-                        active_wb.Activated()
-                        self.history.append("<span style='color:#55ff55;'>ClassicCAD: Reloaded.</span>")
+                    # 1. Καθάρισε το input αμέσως για να μη μείνει το "RR" μέσα
                     self.input.clear()
+                    
+                    # 2. Εμφάνισε το μήνυμα έναρξης
+                    self.history.append("<span style='color:#ffff55;'>System Resetting...</span>")
+                    
+                    # 3. Forced καθαρισμός επιλογών
+                    Gui.Selection.clearSelection()
+                    
+                    # 4. Reload του εργαλείου dev και κλήση του καθολικού reset
+                    import ccad_dev_tools
+                    import importlib
+                    importlib.reload(ccad_dev_tools)
+                    
+                    # ΠΡΟΣΟΧΗ: Αυτό θα διαγράψει και θα ξαναδημιουργήσει την κονσόλα
+                    ccad_dev_tools.reload_classic_cad()
+                    
+                    # ΜΗΝ γράψεις τίποτα άλλο εδώ (self.history κλπ), 
+                    # γιατί το 'self' είναι πλέον "νεκρό" instance.
                     return
 
-                # --- ΛΟΙΠΕΣ ΕΝΤΟΛΕΣ (LAYOFF, κλπ) ---
                 if freecad_cmd in ['LAYOFF', 'LAYON']:
                     if freecad_cmd == 'LAYOFF': ccad_layers.LAYOFF()
                     else: ccad_layers.LAYON()
                 else:
-                    # Εδώ τρέχουν οι κανονικές εντολές του FreeCAD
+                    # Εξασφάλιση ότι είμαστε στο Draft Workbench για το Explode
+                    if freecad_cmd == 'Draft_Downgrade':
+                        Gui.activateWorkbench("DraftWorkbench")
+                    
                     Gui.getMainWindow().setFocus()
                     Gui.runCommand(freecad_cmd)
             except Exception as e:
@@ -224,7 +216,6 @@ def setup():
             
     Gui.classic_console = ClassicConsole(mw)
     mw.addDockWidget(QtCore.Qt.BottomDockWidgetArea, Gui.classic_console)
-    
     QtWidgets.QApplication.instance().installEventFilter(Gui.classic_console)
     
     if hasattr(Gui, "ccad_shortcuts"):
@@ -235,7 +226,6 @@ def setup():
         fw = QtWidgets.QApplication.focusWidget()
         if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
             return
-
         if hasattr(Gui, "classic_console") and not Gui.classic_console.is_draft_active():
             if not Gui.Control.activeDialog():
                 Gui.classic_console.input.setFocus()

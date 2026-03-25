@@ -28,8 +28,6 @@ class ClassicCursor(QtWidgets.QWidget):
             if hasattr(DraftGui, "sniffer") and DraftGui.sniffer:
                 return DraftGui.sniffer.active()
         except Exception:
-            # Αν το Draft workbench "σκάσει" εσωτερικά, 
-            # επιστρέφουμε False για να μην κολλήσει και ο κέρσορας
             return False
         return False
 
@@ -40,19 +38,12 @@ class ClassicCursor(QtWidgets.QWidget):
         return False
 
     def sync(self):
+        # Ασφαλής έλεγχος για το αν υπάρχει ενεργό workbench και view
         try:
-            active_wb = Gui.activeWorkbench().name()
-        except: active_wb = ""
-
-        if "ClassicCAD" not in active_wb:
-            if self.isVisible():
-                self.hide()
-                if self._cursor_forced:
-                    QtWidgets.QApplication.restoreOverrideCursor()
-                    self._cursor_forced = False
-            return
-
-        if not self.viewport or not self.viewport.isVisible(): return
+            if not self.viewport or not self.viewport.isVisible(): return
+            wb = Gui.activeWorkbench()
+            if not wb: return
+        except: return
         
         if self.size() != self.viewport.size():
             self.resize(self.viewport.size())
@@ -83,7 +74,8 @@ class ClassicCursor(QtWidgets.QWidget):
 
     def paintEvent(self, event):
         try:
-            if "ClassicCAD" not in Gui.activeWorkbench().name(): return
+            view = Gui.activeView()
+            if not view: return
         except: return
 
         painter = QtGui.QPainter(self)
@@ -92,14 +84,11 @@ class ClassicCursor(QtWidgets.QWidget):
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
         busy = self.is_busy()
         
-        # Ρύθμιση εμφάνισης
-        alpha = 255 # Πλήρης ορατότητα
+        alpha = 255 
         col_w = QtGui.QColor(255, 255, 255, alpha)
         
-        view = Gui.activeView()
-        if not view: return
         cam_dir = view.getViewDirection()
-        is_ortho = (abs(cam_dir.x) > 0.999 or abs(cam_dir.y) > 0.999 or abs(cam_dir.z) > 0.999)
+        is_ortho = (abs(cam_dir.x) > 0.999999999 or abs(cam_dir.y) > 0.999999999 or abs(cam_dir.z) > 0.999999999)
 
         c_x = col_w if is_ortho else QtGui.QColor(255, 50, 50, alpha)
         c_y = col_w if is_ortho else QtGui.QColor(50, 255, 50, alpha)
@@ -110,20 +99,18 @@ class ClassicCursor(QtWidgets.QWidget):
                      (mat.A21, -mat.A22, c_y, abs(cam_dir.y)), 
                      (mat.A31, -mat.A32, c_z, abs(cam_dir.z))]
         
-        # ΛΕΙΤΟΥΡΓΙΑ: Αν είναι busy, το κενό μηδενίζεται
         gap = 0 if busy else 5
         
         for vx, vy, col, dot in axes_data:
-            if dot > 0.999: continue 
+            if dot > 0.999999999: continue 
             mag = (vx**2 + vy**2)**0.5
-            if mag > 0.001:
+            if mag > 0.000000001:
                 unit = QtCore.QPointF(vx, vy) / mag
-                painter.setPen(QtGui.QPen(col, 0)) # 1 pixel πάχος
+                painter.setPen(QtGui.QPen(col, 0))
                 p_c = QtCore.QPointF(mx, my)
                 painter.drawLine(p_c + unit * gap, p_c + unit * 10000)
                 painter.drawLine(p_c - unit * gap, p_c - unit * 10000)
 
-        # ΛΕΙΤΟΥΡΓΙΑ: Το Pickbox σχεδιάζεται μόνο αν ΔΕΝ τρέχει εντολή
         if not busy:
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 0))
             painter.drawRect(mx-5, my-5, 10, 10)
@@ -133,6 +120,7 @@ def setup():
     if not mw: return
     tear_down()
     
+    # Χρήση του Gui object για να παραμείνει η συνάρτηση στη μνήμη κατά το startup
     def find_and_attach():
         target = None
         for w in mw.findChildren(QtWidgets.QWidget):
@@ -141,24 +129,21 @@ def setup():
                 break
         if target:
             Gui.ccad_cursor = ClassicCursor(target)
+            App.Console.PrintLog("ClassicCAD Cursor: Attached Globally.\n")
         else:
-            QtCore.QTimer.singleShot(1000, find_and_attach)
+            QtCore.QTimer.singleShot(1000, Gui.ccad_find_cursor)
 
-    find_and_attach()
+    Gui.ccad_find_cursor = find_and_attach
+    Gui.ccad_find_cursor()
 
 def tear_down():
     if hasattr(Gui, "ccad_cursor"):
         try:
-            # Σταμάτημα του timer αμέσως
             Gui.ccad_cursor.timer.stop()
-            # Επαναφορά του κέρσορα συστήματος
             if Gui.ccad_cursor._cursor_forced:
                 QtWidgets.QApplication.restoreOverrideCursor()
-            # Άμεση απόκρυψη και αποδέσμευση
             Gui.ccad_cursor.hide()
-            Gui.ccad_cursor.setParent(None) # Αποσύνδεση από το viewport
+            Gui.ccad_cursor.setParent(None)
             Gui.ccad_cursor.deleteLater()
             del Gui.ccad_cursor
-            App.Console.PrintLog("ClassicCAD Cursor: Reset Complete.\n")
-        except Exception as e:
-            App.Console.PrintLog(f"Cursor Tear-down failed: {str(e)}\n")
+        except: pass
