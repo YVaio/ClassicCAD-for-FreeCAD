@@ -20,11 +20,18 @@ def REGEN():
 
         dynamic_deviation = visible_height * 0.001
         if dynamic_deviation < 0.0005: dynamic_deviation = 0.0005
-        if dynamic_deviation > 0.5: dynamic_deviation = 0.5
 
-        import Part
-        Part.setObjectDeviation(dynamic_deviation)
+        # Ρύθμιση Deviation για όλα τα αντικείμενα
+        for obj in doc.Objects:
+            if hasattr(obj, 'ViewObject') and obj.ViewObject:
+                vo = obj.ViewObject
+                if hasattr(vo, "Deviation"):
+                    vo.Deviation = dynamic_deviation
+                if hasattr(vo, "AngularDeflection"):
+                    vo.AngularDeflection = dynamic_deviation * 10
+        
         doc.recompute()
+        Gui.updateGui()
         App.Console.PrintLog(f"REGEN: Done (Deviation: {dynamic_deviation:.4f})\n")
     except Exception as e:
         App.Console.PrintError(f"REGEN Error: {str(e)}\n")

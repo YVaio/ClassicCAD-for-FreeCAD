@@ -142,7 +142,53 @@ class AutoSelectionBlocker:
         try:
             self.recent_objects.add(obj.Name)
             QtCore.QTimer.singleShot(200, lambda n=obj.Name: self.recent_objects.discard(n))
+            
+            # Αυτόματη μετατροπή Rectangle σε Wire
+            QtCore.QTimer.singleShot(50, lambda: self._convert_rect_to_wire(obj))
         except: pass
+
+    def _convert_rect_to_wire(self, obj):
+        try:
+            doc = App.ActiveDocument
+            if not doc or obj.Name not in doc.PropertiesList and not doc.getObject(obj.Name):
+                return
+            obj = doc.getObject(obj.Name)
+            if not obj or not hasattr(obj, 'Proxy'):
+                return
+            if obj.Proxy.__class__.__name__ != 'Rectangle':
+                return
+            
+            import Draft, DraftVecUtils
+            # Πάρε τα 4 σημεία του rectangle
+            p = obj.Placement
+            h = float(obj.Height)
+            l = float(obj.Length)
+            base = p.Base
+            rot = p.Rotation
+            
+            pts = [
+                App.Vector(0, 0, 0),
+                App.Vector(l, 0, 0),
+                App.Vector(l, h, 0),
+                App.Vector(0, h, 0),
+            ]
+            # Εφαρμογή rotation και μετατόπιση
+            pts = [rot.multVec(pt) + base for pt in pts]
+            
+            # Αντιγραφή visual properties πριν τη διαγραφή
+            layer = getattr(obj, 'Layer', None)
+            
+            # Διαγραφή rectangle
+            doc.removeObject(obj.Name)
+            
+            # Δημιουργία Wire
+            wire = Draft.make_wire(pts, closed=True, face=False)
+            if layer and hasattr(wire, 'Layer'):
+                wire.Layer = layer
+            
+            doc.recompute()
+        except Exception:
+            pass
 
     def addSelection(self, *args):
         if self._is_processing or len(args) < 2: return

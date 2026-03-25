@@ -13,10 +13,36 @@ class ClassicCursor(QtWidgets.QWidget):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.sync)
         self.timer.start(10)
+
+        self.viewport.installEventFilter(self)
+        self._is_orbiting_or_panning = False
+        self._cursor_state = None  # None, 'blank', 'cross'
         
         self.resize(self.viewport.size())
         self.show()
-        self._cursor_forced = False
+
+    def _set_cursor(self, state):
+        if state == self._cursor_state:
+            return
+        if self._cursor_state is not None:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if state == 'blank':
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.BlankCursor)
+        elif state == 'cross':
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CrossCursor)
+        else:
+            # Εξασφάλιση ότι το viewport δείχνει κανονικό cursor
+            self.viewport.unsetCursor()
+        self._cursor_state = state
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.MouseButtonPress:
+            if event.button() == QtCore.Qt.MiddleButton:
+                self._is_orbiting_or_panning = True
+        elif event.type() == QtCore.QEvent.MouseButtonRelease:
+            if event.button() == QtCore.Qt.MiddleButton:
+                self._is_orbiting_or_panning = False
+        return False
 
     def is_busy(self):
         try:
@@ -48,6 +74,11 @@ class ClassicCursor(QtWidgets.QWidget):
         if self.size() != self.viewport.size():
             self.resize(self.viewport.size())
 
+        if self._is_orbiting_or_panning:
+            if self.isVisible(): self.hide()
+            self._set_cursor('cross')
+            return
+
         global_pos = QtGui.QCursor.pos()
         pos = self.viewport.mapFromGlobal(global_pos)
         
@@ -56,18 +87,12 @@ class ClassicCursor(QtWidgets.QWidget):
 
         if not self.viewport.rect().contains(pos) or self.is_over_nav_cube(pos) or is_occluded:
             if self.isVisible(): self.hide()
-            if self._cursor_forced:
-                QtWidgets.QApplication.restoreOverrideCursor()
-                self._cursor_forced = False
+            self._set_cursor(None)
         else:
-            if self.isHidden(): 
+            if self.isHidden():
                 self.show()
                 self.raise_()
-
-            if not self._cursor_forced:
-                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.BlankCursor)
-                self._cursor_forced = True
-            
+            self._set_cursor('blank')
             if pos != self.mouse_pos:
                 self.mouse_pos = pos
                 self.update()
@@ -82,7 +107,7 @@ class ClassicCursor(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
-        busy = self.is_busy()
+        busy = self.is_busy() or self._is_orbiting_or_panning
         
         alpha = 255 
         col_w = QtGui.QColor(255, 255, 255, alpha)
@@ -140,7 +165,7 @@ def tear_down():
     if hasattr(Gui, "ccad_cursor"):
         try:
             Gui.ccad_cursor.timer.stop()
-            if Gui.ccad_cursor._cursor_forced:
+            if Gui.ccad_cursor._cursor_state is not None:
                 QtWidgets.QApplication.restoreOverrideCursor()
             Gui.ccad_cursor.hide()
             Gui.ccad_cursor.setParent(None)
