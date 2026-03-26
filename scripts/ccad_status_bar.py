@@ -1,8 +1,7 @@
-"""ClassicCAD Status Bar — Draggable toolbar with ORTHO / OSNAP toggles.
+"""ClassicCAD Status Bar — ORTHO toggle next to Snap Lock in the status bar.
 
-Standard QToolBar using QActions so the buttons look and behave like the
-built-in FreeCAD snap toolbar — checkable icon-style buttons that can be
-dragged to any toolbar area.
+Finds the Draft Snap toolbar and inserts an ORTHO button right after
+the Snap Lock action, styled to match the existing toolbar icons.
 """
 
 import FreeCAD as App
@@ -10,65 +9,89 @@ import FreeCADGui as Gui
 from PySide6 import QtWidgets, QtCore, QtGui
 
 
-class ClassicStatusBar(QtWidgets.QToolBar):
+class ClassicStatusBar(QtCore.QObject):
+    """Manages the ORTHO button next to the Snap Lock button."""
+
     def __init__(self, parent_mw):
-        super().__init__("ClassicCAD Drawing Aids", parent_mw)
-        self.setObjectName("ClassicCADStatusBar")
-        self.setMovable(True)
-        self.setFloatable(True)
-        self.setIconSize(QtCore.QSize(24, 24))
+        super().__init__(parent_mw)
+        self.mw = parent_mw
+        self.ortho_btn = None
+        self._retries = 0
+        self._try_insert()
 
-        # ── ORTHO action ──
-        self.ortho_act = QtGui.QAction("ORTHO", self)
-        self.ortho_act.setCheckable(True)
-        self.ortho_act.setToolTip("Toggle Ortho mode (F8)")
-        self.ortho_act.setIcon(self._text_icon("O", False))
-        self.ortho_act.toggled.connect(self._on_ortho)
-        self.addAction(self.ortho_act)
+    def _try_insert(self):
+        """Insert ORTHO into the draft_snap_widget toolbar (lives inside the status bar)."""
+        target_tb = self.mw.findChild(QtWidgets.QToolBar, 'draft_snap_widget')
+        grid_act = None
+        if target_tb:
+            for act in target_tb.actions():
+                if act.objectName() == 'Draft_ToggleGrid':
+                    grid_act = act
+                    break
 
-        # ── OSNAP action (hidden — kept for sync_osnap API) ──
-        self.osnap_act = QtGui.QAction("OSNAP", self)
-        self.osnap_act.setCheckable(True)
-        self.osnap_act.setToolTip("Toggle Object Snap (F3)")
-        self.osnap_act.setIcon(self._text_icon("S", False))
-        self.osnap_act.setChecked(self._get_osnap_state())
-        self._update_icon(self.osnap_act)
-        self.osnap_act.toggled.connect(self._on_osnap)
-        # Not added to toolbar — hidden per user request
+        if target_tb:
+            if self.ortho_btn is None:
+                sz = target_tb.iconSize()
+                self.ortho_btn = QtGui.QAction(self.mw)
+                self.ortho_btn.setCheckable(True)
+                self.ortho_btn.setChecked(False)
+                self.ortho_btn.setToolTip("Toggle Ortho mode (F8)")
+                self.ortho_btn.setIcon(self._make_icon(False, sz.width()))
+                self.ortho_btn.toggled.connect(self._on_ortho)
+                self._icon_sz = sz.width()
 
-        parent_mw.addToolBar(QtCore.Qt.TopToolBarArea, self)
+            # Insert right after the grid button (first action found)
+            actions = target_tb.actions()
+            if self.ortho_btn not in actions:
+                # Find the action after grid_act
+                after = None
+                for i, a in enumerate(actions):
+                    if a is grid_act and i + 1 < len(actions):
+                        after = actions[i + 1]
+                        break
+                if after:
+                    target_tb.insertAction(after, self.ortho_btn)
+                else:
+                    target_tb.addAction(self.ortho_btn)
+            return
 
-    # ── icon helper ──
+        # Not found yet — retry
+        self._retries += 1
+        if self._retries < 20:
+            QtCore.QTimer.singleShot(500, self._try_insert)
 
     @staticmethod
-    def _text_icon(letter, on):
-        """Create a small icon with a letter, coloured by state."""
-        px = QtGui.QPixmap(24, 24)
+    def _make_icon(on, size=24):
+        """Create a frameless L-shape icon matching the snap bar line style."""
+        px = QtGui.QPixmap(size, size)
         px.fill(QtCore.Qt.transparent)
         p = QtGui.QPainter(px)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        if on:
-            p.setBrush(QtGui.QColor("#005f87"))
-            p.setPen(QtGui.QPen(QtGui.QColor("#0af"), 1.5))
-        else:
-            p.setBrush(QtGui.QColor("#2a2a2a"))
-            p.setPen(QtGui.QPen(QtGui.QColor("#555"), 1))
-        p.drawRoundedRect(1, 1, 22, 22, 4, 4)
-        font = QtGui.QFont("Consolas", 13, QtGui.QFont.Bold)
-        p.setFont(font)
-        p.setPen(QtGui.QColor("#fff") if on else QtGui.QColor("#666"))
-        p.drawText(QtCore.QRect(0, 0, 24, 24), QtCore.Qt.AlignCenter, letter)
+
+        # Simple L-shape lines, no background
+        s = size
+        lw = max(2.0, s / 10)
+        color = QtGui.QColor(0, 200, 255) if on else QtGui.QColor(160, 160, 160)
+        pen = QtGui.QPen(color, lw, QtCore.Qt.SolidLine,
+                         QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
+        p.setPen(pen)
+        x1 = int(s * 0.28)
+        y1 = int(s * 0.15)
+        y2 = int(s * 0.80)
+        x2 = int(s * 0.80)
+        p.drawLine(x1, y1, x1, y2)
+        p.drawLine(x1, y2, x2, y2)
+
         p.end()
         return QtGui.QIcon(px)
 
-    def _update_icon(self, action):
-        letter = "O" if action is self.ortho_act else "S"
-        action.setIcon(self._text_icon(letter, action.isChecked()))
+    def _icon_size(self):
+        return getattr(self, '_icon_sz', 24)
 
     # ── ORTHO ──
 
     def _on_ortho(self, checked):
-        self._update_icon(self.ortho_act)
+        self.ortho_btn.setIcon(self._make_icon(checked, self._icon_size()))
         dt = getattr(Gui, 'ccad_draft_tools', None)
         if dt:
             import ccad_draft_tools
@@ -81,39 +104,16 @@ class ClassicStatusBar(QtWidgets.QToolBar):
     def sync_ortho(self):
         import ccad_draft_tools
         on = ccad_draft_tools.ClassicDraftTools._ortho_enabled
-        if self.ortho_act.isChecked() != on:
-            self.ortho_act.blockSignals(True)
-            self.ortho_act.setChecked(on)
-            self.ortho_act.blockSignals(False)
-        self._update_icon(self.ortho_act)
+        if self.ortho_btn.isChecked() != on:
+            self.ortho_btn.blockSignals(True)
+            self.ortho_btn.setChecked(on)
+            self.ortho_btn.blockSignals(False)
+        self.ortho_btn.setIcon(self._make_icon(on, self._icon_size()))
 
-    # ── OSNAP ──
-
-    def _on_osnap(self, checked):
-        self._update_icon(self.osnap_act)
-        dt = getattr(Gui, 'ccad_draft_tools', None)
-        if dt:
-            # Only toggle if state differs
-            if self._get_osnap_state() != checked:
-                dt.toggle_osnap()
-        else:
-            Gui.runCommand('Draft_Snap_Lock', 0)
+    # ── OSNAP (API kept for sync calls) ──
 
     def sync_osnap(self):
-        on = self._get_osnap_state()
-        if self.osnap_act.isChecked() != on:
-            self.osnap_act.blockSignals(True)
-            self.osnap_act.setChecked(on)
-            self.osnap_act.blockSignals(False)
-        self._update_icon(self.osnap_act)
-
-    @staticmethod
-    def _get_osnap_state():
-        try:
-            p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
-            return p.GetBool("Snap")
-        except Exception:
-            return False
+        pass
 
 
 def setup():
@@ -123,8 +123,14 @@ def setup():
     # Cleanup old instance
     if hasattr(Gui, 'ccad_status_bar'):
         try:
-            mw.removeToolBar(Gui.ccad_status_bar)
-            Gui.ccad_status_bar.deleteLater()
+            old = Gui.ccad_status_bar
+            if hasattr(old, 'ortho_btn') and old.ortho_btn:
+                # Remove the action from any toolbar it was inserted into
+                for tb in mw.findChildren(QtWidgets.QToolBar):
+                    if old.ortho_btn in tb.actions():
+                        tb.removeAction(old.ortho_btn)
+                        break
+            old.deleteLater()
         except Exception:
             pass
     Gui.ccad_status_bar = ClassicStatusBar(mw)
