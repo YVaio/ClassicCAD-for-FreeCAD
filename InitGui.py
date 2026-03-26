@@ -27,6 +27,7 @@ active_modules = [
     "ccad_selection",
     "ccad_draft_tools",
     "ccad_layers",
+    "ccad_status_bar",
     #"ccad_snaps",
     "ccad_dev_tools"
 ]

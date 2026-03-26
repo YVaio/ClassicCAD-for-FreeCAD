@@ -46,16 +46,22 @@ class ClassicCursor(QtWidgets.QWidget):
 
     def is_busy(self):
         try:
-            # Έλεγχος Task Panel
-            if Gui.Control.activeDialog():
-                return True
-            # Έλεγχος Draft Sniffer με προστασία από σφάλματα του Draft
-            import DraftGui
-            if hasattr(DraftGui, "sniffer") and DraftGui.sniffer:
-                return DraftGui.sniffer.active()
+            # Python-only check — avoid C++ Gui.Control calls (they cause RuntimeError spam)
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                cls_name = App.activeDraftCommand.__class__.__name__ or ''
+                if 'Edit' not in cls_name:
+                    return True
         except Exception:
             return False
         return False
+
+    @staticmethod
+    def _is_draft_edit_dialog():
+        """True if the active Draft command is Draft_Edit."""
+        if not hasattr(App, 'activeDraftCommand') or not App.activeDraftCommand:
+            return False
+        cls_name = App.activeDraftCommand.__class__.__name__ or ''
+        return 'Edit' in cls_name
 
     def is_over_nav_cube(self, pos):
         width = self.viewport.width()
@@ -110,14 +116,14 @@ class ClassicCursor(QtWidgets.QWidget):
         busy = self.is_busy() or self._is_orbiting_or_panning
         
         alpha = 255 
-        col_w = QtGui.QColor(255, 255, 255, alpha)
+        col_w = QtGui.QColor(205, 205, 205, alpha)
         
         cam_dir = view.getViewDirection()
         is_ortho = (abs(cam_dir.x) > 0.999999999 or abs(cam_dir.y) > 0.999999999 or abs(cam_dir.z) > 0.999999999)
 
-        c_x = col_w if is_ortho else QtGui.QColor(255, 50, 50, alpha)
-        c_y = col_w if is_ortho else QtGui.QColor(50, 255, 50, alpha)
-        c_z = col_w if is_ortho else QtGui.QColor(50, 50, 255, alpha)
+        c_x = col_w if is_ortho else QtGui.QColor(205, 0, 0, alpha)
+        c_y = col_w if is_ortho else QtGui.QColor(0, 205, 0, alpha)
+        c_z = col_w if is_ortho else QtGui.QColor(0, 0, 205, alpha)
         
         mat = view.getCameraOrientation().toMatrix()
         axes_data = [(mat.A11, -mat.A12, c_x, abs(cam_dir.x)), 

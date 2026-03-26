@@ -1,9 +1,33 @@
 import FreeCADGui as Gui
 import FreeCAD as App
+import time
 from PySide6 import QtWidgets, QtCore, QtGui
+import ccad_cmd_xline
+
+
+def _has_active_draft_command():
+    """True if a non-Edit Draft command is running or in continue-mode gap."""
+    if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+        cls = App.activeDraftCommand.__class__.__name__ or ''
+        if 'Edit' not in cls:
+            return True
+    blocker = getattr(Gui, 'ccad_auto_blocker', None)
+    if blocker and time.time() - blocker._last_cmd_time < 1.0:
+        return True
+    return False
+
+
+def _close_dialog_safe():
+    """Close task panel only when a Draft command is actually active."""
+    if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+        try:
+            Gui.Control.closeDialog()
+        except Exception:
+            pass
+
 
 # =========================================================
-# 1. SELECTION BOX WIDGET (Παθητικό οπτικό στοιχείο)
+# SELECTION BOX WIDGET
 # =========================================================
 class SelectionBox(QtWidgets.QWidget):
     def __init__(self, target_viewport):
@@ -18,92 +42,99 @@ class SelectionBox(QtWidgets.QWidget):
         self.hide()
 
     def paintEvent(self, event):
-        if not self.is_active or not self.start_pos or not self.current_pos: return
+        if not self.is_active or not self.start_pos or not self.current_pos:
+            return
         painter = QtGui.QPainter(self)
         rect = QtCore.QRect(self.start_pos, self.current_pos).normalized()
-        is_crossing = self.current_pos.x() < self.start_pos.x()
-        
-        if is_crossing:
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 255, 0, 60)))
+        crossing = self.current_pos.x() < self.start_pos.x()
+        if crossing:
+            painter.setBrush(QtGui.QColor(0, 255, 0, 60))
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 1, QtCore.Qt.DashLine))
         else:
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(0, 100, 255, 60)))
+            painter.setBrush(QtGui.QColor(0, 100, 255, 60))
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 1, QtCore.Qt.SolidLine))
         painter.drawRect(rect)
 
 # =========================================================
-# 2. SELECTION BOX LOGIC (AutoCAD-style click-drag-release)
+# SELECTION BOX LOGIC (Two-click mode)
 # =========================================================
 class CCADSelectionLogic(QtCore.QObject):
-    DRAG_THRESHOLD = 5  # pixels πριν εμφανιστεί το box
+    DRAG_THRESHOLD = 5
 
     def __init__(self, viewport):
         super().__init__(viewport)
         self.viewport = viewport
         self.box = SelectionBox(viewport)
-        self.esc_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Esc"), self.viewport)
-        self.esc_shortcut.activated.connect(self.force_escape)
         self.viewport.installEventFilter(self)
-        self.state = 0  # 0=idle, 1=pressed, 2=dragging
+        self.state = 0  # 0=idle, 1=first corner placed
 
-    def force_escape(self):
+    def cancel_box(self):
         self.state = 0
         self.box.is_active = False
         self.box.hide()
-        pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
-        if pickadd:
-            pickadd.handle_full_escape()
 
     def eventFilter(self, obj, event):
+        # Let XLINE/TRIM handlers take over when active
+        if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+            return False
+        if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+            return False
+
         # --- LEFT PRESS ---
         if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-            if Gui.Control.activeDialog(): return False
+            if _has_active_draft_command(): return False
 
-            # Object υπό τον κέρσορα → FreeCAD κάνει single-click select
+            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+
+            # Second click → perform selection
+            if self.state == 1:
+                self.box.current_pos = pos
+                self._perform_selection()
+                self.box.is_active = False
+                self.box.hide()
+                self.state = 0
+                return True
+
+            # First click: object under cursor → let FreeCAD handle
             try:
                 pre = Gui.Selection.getPreselection()
                 if pre.ObjectName:
                     return False
             except: pass
 
-            # Κενός χώρος → ξεκινάμε πιθανό box
-            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            # First click on empty space → set first corner
             self.box.start_pos = pos
             self.box.current_pos = pos
             self.state = 1
-            return True  # Block FreeCAD drag
+            return True
+
+        # --- RIGHT PRESS (cancel box) ---
+        elif event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.RightButton:
+            if self.state == 1:
+                self.state = 0
+                self.box.is_active = False
+                self.box.hide()
 
         # --- MOUSE MOVE ---
         elif event.type() == QtCore.QEvent.MouseMove:
-            if self.state >= 1:
+            if self.state == 1:
                 pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
                 self.box.current_pos = pos
 
-                if self.state == 1:
+                if not self.box.is_active:
                     dx = abs(pos.x() - self.box.start_pos.x())
                     dy = abs(pos.y() - self.box.start_pos.y())
                     if dx > self.DRAG_THRESHOLD or dy > self.DRAG_THRESHOLD:
                         self.box.is_active = True
                         self.box.show()
-                        self.state = 2
 
-                if self.state == 2:
-                    self.box.update()
+                self.box.update()
                 return True
             return False
 
-        # --- LEFT RELEASE ---
+        # --- LEFT RELEASE (consume but no action) ---
         elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
-            if self.state == 2:
-                # Drag ολοκληρώθηκε → εκτέλεσε selection
-                self._perform_selection()
-                self.box.is_active = False
-                self.box.hide()
-                self.state = 0
-                return True
-            elif self.state == 1:
-                # Click σε κενό χωρίς drag → τίποτα (PICKADD κρατάει selection)
-                self.state = 0
+            if self.state == 1:
                 return True
             return False
 
@@ -119,10 +150,9 @@ class CCADSelectionLogic(QtCore.QObject):
             from pivy import coin
             cam = view.getCameraNode()
             vol = cam.getViewVolume()
-            viewer = view.getViewer()
-            vpr = viewer.getSoRenderManager().getViewportRegion()
-            size = vpr.getViewportSizePixels()
-            w, h = int(size.getValue()[0]), int(size.getValue()[1])
+            # Use widget dimensions (logical pixels) to match mouse event coords
+            w = self.viewport.width()
+            h = self.viewport.height()
             return (coin, vol, w, h)
         except Exception:
             return None
@@ -186,20 +216,22 @@ class CCADSelectionLogic(QtCore.QObject):
         rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
         is_crossing = self.box.current_pos.x() < self.box.start_pos.x()
 
-        # Box selection αντικαθιστά (δεν κάνει additive) εκτός αν κρατάς Shift
         pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
         if pickadd:
             pickadd.previous_selection = []
 
         blocker = getattr(Gui, 'ccad_auto_blocker', None)
         if blocker:
-            blocker._opening_grips = True  # Block auto-grips μέχρι να τελειώσει
+            blocker._opening_grips = True
 
         if not (QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier):
             Gui.Selection.clearSelection()
 
         proj = self._get_projection(view)
-        if not proj: return
+        if not proj:
+            if blocker:
+                blocker._opening_grips = False
+            return
 
         for obj in doc.Objects:
             try:
@@ -229,7 +261,7 @@ class CCADSelectionLogic(QtCore.QObject):
             except Exception:
                 continue
 
-        # Άνοιξε grips για όλα τα επιλεγμένα objects μαζικά
+        # Άνοιξε grips για όλα τα επιλεγμένα objects
         if blocker:
             blocker._opening_grips = False
             sel = Gui.Selection.getSelection()
@@ -238,7 +270,7 @@ class CCADSelectionLogic(QtCore.QObject):
                 QtCore.QTimer.singleShot(30, blocker._open_grips)
 
 # =========================================================
-# 3. ΔΙΑΧΕΙΡΙΣΗ AUTO GRIPS & PICK RADIUS (Το δικό σου setup)
+# AUTO GRIPS & PICK RADIUS
 # =========================================================
 class AutoSelectionBlocker:
     def __init__(self):
@@ -246,6 +278,7 @@ class AutoSelectionBlocker:
         self._is_processing = False
         self._opening_grips = False
         self._gripped_objects = []
+        self._last_cmd_time = 0
 
     def slotCreatedObject(self, obj):
         try:
@@ -253,7 +286,8 @@ class AutoSelectionBlocker:
             self.recent_objects.add(name)
             QtCore.QTimer.singleShot(200, lambda n=name: self.recent_objects.discard(n))
             QtCore.QTimer.singleShot(50, lambda n=name: self._convert_rect_to_wire(n))
-        except Exception: pass
+        except Exception:
+            pass
 
     def _convert_rect_to_wire(self, obj_name):
         try:
@@ -265,8 +299,7 @@ class AutoSelectionBlocker:
             if obj.Proxy.__class__.__name__ != 'Rectangle':
                 return
             
-            import Draft, DraftVecUtils
-            # Πάρε τα 4 σημεία του rectangle
+            import Draft
             p = obj.Placement
             h = float(obj.Height)
             l = float(obj.Length)
@@ -297,71 +330,81 @@ class AutoSelectionBlocker:
         except Exception:
             pass
 
+    def _draft_command_active(self):
+        """True if a Draft drawing command (not Draft_Edit) is running."""
+        if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+            cmd = App.activeDraftCommand
+            cls_name = cmd.__class__.__name__ if cmd else ''
+            if 'Edit' in cls_name:
+                return False
+            self._last_cmd_time = time.time()
+            return True
+        if time.time() - self._last_cmd_time < 1.0:
+            return True
+        return False
+
     def addSelection(self, *args):
         try:
-            if self._is_processing or self._opening_grips or len(args) < 2: return
+            if self._is_processing or self._opening_grips or len(args) < 2:
+                return
             obj_name = args[1]
-
             if obj_name in self.recent_objects:
-                doc = args[0]
+                doc_name = args[0]
                 self._is_processing = True
-                QtCore.QTimer.singleShot(0, lambda d=doc, o=obj_name: self._safe_remove(d, o))
+                QtCore.QTimer.singleShot(0, lambda d=doc_name, o=obj_name: self._safe_remove(d, o))
                 return
-
-            # Αν ο Draft_Edit είναι ήδη ενεργός, μην τον ξανανοίγεις
-            if Gui.Control.activeDialog():
+            if self._draft_command_active():
                 return
-
-            # Άνοιξε grips μετά 30ms (μετά το restore_additive στα 15ms)
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                return
             self._opening_grips = True
             QtCore.QTimer.singleShot(30, self._open_grips)
-        except Exception: pass
+        except Exception:
+            pass
 
-    def _safe_remove(self, doc, obj):
-        Gui.Selection.removeSelection(doc, obj)
+    def _safe_remove(self, doc_name, obj_name):
+        try:
+            doc = App.ActiveDocument
+            if doc and doc.getObject(obj_name):
+                Gui.Selection.removeSelection(doc_name, obj_name)
+        except Exception:
+            pass
         self._is_processing = False
 
     def _open_grips(self):
         try:
-            # Αν ήδη υπάρχει dialog (grips ανοιχτά), μην ξανανοίγεις
-            if Gui.Control.activeDialog():
+            pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
+            if pickadd and pickadd._escaping:
+                return
+            if self._draft_command_active():
+                return
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
                 return
             sel = Gui.Selection.getSelection()
             if not sel:
                 return
-            sel_info = [(o.Document.Name, o.Name) for o in sel]
+            editable = [o for o in sel if hasattr(o, 'Shape') and not o.Shape.isNull()]
+            # Skip XLine objects — own Coin markers handle their grips
+            editable = [o for o in editable if not ccad_cmd_xline.is_xline(o)]
+            if not editable:
+                return
+            doc = App.ActiveDocument
+            sel_info = [(o.Document.Name, o.Name) for o in editable]
             self._gripped_objects = list(sel_info)
             Gui.runCommand("Draft_Edit")
-            # Επαναφορά selection μετά το Draft_Edit
-            for doc_name, obj_name in sel_info:
-                Gui.Selection.addSelection(doc_name, obj_name)
-        except: pass
+            for dn, on in sel_info:
+                try:
+                    if doc and doc.getObject(on):
+                        Gui.Selection.addSelection(dn, on)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         finally:
             self._opening_grips = False
 
     def removeSelection(self, *args):
-        try:
-            if self._is_processing or self._opening_grips: return
-            pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
-            if pickadd and pickadd._escaping: return
-            if self._gripped_objects:
-                QtCore.QTimer.singleShot(200, self._reselect_after_grip)
-        except Exception: pass
-
-    def _reselect_after_grip(self):
-        try:
-            if self._opening_grips: return
-            pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
-            if pickadd and pickadd._escaping: return
-            sel = Gui.Selection.getSelection()
-            if not sel and self._gripped_objects:
-                self._opening_grips = True
-                for doc_name, obj_name in self._gripped_objects:
-                    try: Gui.Selection.addSelection(doc_name, obj_name)
-                    except Exception: pass
-                self._opening_grips = False
-        except Exception:
-            self._opening_grips = False
+        pass
 
 class SelectionManager:
     @staticmethod
@@ -398,44 +441,63 @@ class AdditiveSelectionFilter(QtCore.QObject):
         self._escaping = False
 
     def handle_full_escape(self):
-        """Κεντρικό ESC: κλείνει dialog, μετά double-delayed clearSelection."""
-        if self._escaping: return
+        if self._escaping:
+            return
         self.previous_selection = []
         self._escaping = True
         blocker = getattr(Gui, 'ccad_auto_blocker', None)
         if blocker:
             blocker._opening_grips = True
             blocker._gripped_objects = []
+        _close_dialog_safe()
+        Gui.Selection.clearSelection()
+        QtCore.QTimer.singleShot(100, self._finish_escape)
+
+    def _finish_escape(self):
         try:
-            if Gui.Control.activeDialog():
-                Gui.Control.closeDialog()
-        except Exception: pass
-        # Double clear: ο Draft_Edit κατά shutdown re-selects, ίσως async.
-        QtCore.QTimer.singleShot(50, self._delayed_clear)
-        QtCore.QTimer.singleShot(200, self._final_clear)
-
-    def _delayed_clear(self):
-        try: Gui.Selection.clearSelection()
-        except Exception: pass
-
-    def _final_clear(self):
-        try: Gui.Selection.clearSelection()
-        except Exception: pass
+            Gui.Selection.clearSelection()
+        except Exception:
+            pass
         blocker = getattr(Gui, 'ccad_auto_blocker', None)
         if blocker:
             blocker._opening_grips = False
         self._escaping = False
 
     def eventFilter(self, obj, event):
-        if not self.active or self._escaping: return False
+        if not self.active or self._escaping:
+            return False
+        if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+            return False
+        if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+            return False
 
-        # ESC
-        if event.type() == QtCore.QEvent.Type.KeyPress:
-            if event.key() == QtCore.Qt.Key_Escape:
-                self.handle_full_escape()
+        if event.type() == QtCore.QEvent.Type.KeyPress and event.key() == QtCore.Qt.Key_Escape:
+            # Console text editing takes priority
+            console = getattr(Gui, 'classic_console', None)
+            if console and console.input.hasFocus() and console.input.text():
                 return False
+            # Cancel selection box
+            sel_logic = getattr(Gui, 'ccad_sel_logic', None)
+            if sel_logic:
+                sel_logic.cancel_box()
+            # Cancel XLINE
+            if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+                Gui.ccad_xline_handler._cleanup()
+                return True
+            # Cancel TRIM/EXTEND
+            if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+                Gui.ccad_trim_handler._cleanup()
+                return True
+            # If a non-Edit Draft command is running, let FreeCAD handle ESC
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                cls = App.activeDraftCommand.__class__.__name__ or ''
+                if 'Edit' not in cls:
+                    self.previous_selection = []
+                    return False
+            # Full escape (Edit grips or idle)
+            self.handle_full_escape()
+            return True
 
-        # Mouse events — ΠΑΝΤΑ καταγράφουμε
         try:
             if hasattr(obj, 'metaObject') and "View3DInventor" in obj.metaObject().className():
                 if event.type() == QtCore.QEvent.Type.MouseButtonPress:
@@ -447,73 +509,105 @@ class AdditiveSelectionFilter(QtCore.QObject):
                     if event.button() == QtCore.Qt.MouseButton.LeftButton:
                         if event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier:
                             QtCore.QTimer.singleShot(15, self.restore_additive)
-        except Exception: pass
+        except Exception:
+            pass
         return False
 
     def restore_additive(self):
-        if not self.active or self._escaping: return
+        if not self.active or self._escaping:
+            return
         try:
             current = Gui.Selection.getSelectionEx()
             current_names = set(s.ObjectName for s in current)
             previous_names = set(s.ObjectName for s in self.previous_selection)
 
-            # Ίδια selection (π.χ. grip drag) → μην πειράξεις τίποτα
             if current_names == previous_names:
                 return
 
-            # Κλικ στο κενό → PICKADD: επαναφορά
+            doc = App.ActiveDocument
             if not current and self.previous_selection:
                 self.active = False
                 for old in self.previous_selection:
-                    try: Gui.Selection.addSelection(old.DocumentName, old.ObjectName)
-                    except Exception: pass
+                    if doc and doc.getObject(old.ObjectName):
+                        try:
+                            Gui.Selection.addSelection(old.DocumentName, old.ObjectName)
+                        except Exception:
+                            pass
                 self.active = True
                 return
 
-            # Νέο object κλικ → additive
             if current and self.previous_selection:
                 self.active = False
                 for old in self.previous_selection:
                     if old.ObjectName not in current_names:
-                        try: Gui.Selection.addSelection(old.DocumentName, old.ObjectName)
-                        except Exception: pass
+                        if doc and doc.getObject(old.ObjectName):
+                            try:
+                                Gui.Selection.addSelection(old.DocumentName, old.ObjectName)
+                            except Exception:
+                                pass
                 self.active = True
 
-                # Αν προστέθηκε νέο object ενώ ο Draft_Edit ήταν ανοικτός,
-                # κλείσε τον και ξανάνοιξέ τον με ΟΛΑ τα objects.
                 new_objects = current_names - previous_names
-                if new_objects and Gui.Control.activeDialog():
-                    all_sel = Gui.Selection.getSelection()
-                    self._refresh_grips(all_sel)
-        except Exception: pass
+                has_edit = (hasattr(App, 'activeDraftCommand') and App.activeDraftCommand
+                           and 'Edit' in (App.activeDraftCommand.__class__.__name__ or ''))
+                if new_objects and has_edit:
+                    self._refresh_grips(Gui.Selection.getSelection())
+        except Exception:
+            pass
 
     def _refresh_grips(self, sel):
-        if self._escaping or not sel: return
+        if self._escaping or not sel:
+            return
         blocker = getattr(Gui, 'ccad_auto_blocker', None)
-        if not blocker: return
+        if not blocker:
+            return
         try:
             sel_info = [(o.Document.Name, o.Name) for o in sel]
             blocker._opening_grips = True
             blocker._gripped_objects = list(sel_info)
-            if Gui.Control.activeDialog():
-                Gui.Control.closeDialog()
-            Gui.runCommand("Draft_Edit")
+            _close_dialog_safe()
+            # closeDialog clears selection; Draft_Edit needs it on startup
+            doc = App.ActiveDocument
             for d, n in sel_info:
-                try: Gui.Selection.addSelection(d, n)
-                except Exception: pass
-        except Exception: pass
+                try:
+                    if doc and doc.getObject(n):
+                        Gui.Selection.addSelection(d, n)
+                except Exception:
+                    pass
+            Gui.runCommand("Draft_Edit")
+            # Re-add: Draft_Edit may consume selection
+            for d, n in sel_info:
+                try:
+                    if doc and doc.getObject(n):
+                        Gui.Selection.addSelection(d, n)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         finally:
             blocker._opening_grips = False
 
 # =========================================================
-# 4. SETUP
+# SETUP
 # =========================================================
 def setup():
     mw = Gui.getMainWindow()
     if not mw: return
 
-    param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
-    param.SetBool("SubSelection", False) 
+    # Fix Draft Grid spacing zero error (gridSpacing is a string param, e.g. "10 mm")
+    grid_param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+    grid_spacing_str = grid_param.GetString("gridSpacing", "")
+    try:
+        spacing_val = App.Units.Quantity(grid_spacing_str).Value if grid_spacing_str else 0
+    except Exception:
+        spacing_val = 0
+    if spacing_val <= 0:
+        grid_param.SetString("gridSpacing", "10 mm")
+    grid_param.SetBool("SubSelection", False)
+
+    # Raise Draft_Edit limit (default is 5)
+    draft_param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+    draft_param.SetInt("DraftEditMaxObjects", 100)
 
     if hasattr(Gui, "ccad_sel_logic"):
         try:
@@ -534,11 +628,7 @@ def setup():
     App.addDocumentObserver(Gui.ccad_auto_blocker)
     Gui.Selection.addObserver(Gui.ccad_auto_blocker)
 
-    target = next((w for w in mw.findChildren(QtWidgets.QWidget) 
-                  if "View3DInventor" in w.metaObject().className() and w.isVisible()), None)
-    
-    if target:
-        Gui.ccad_sel_logic = CCADSelectionLogic(target)
+    _attach_viewport(mw)
 
     if hasattr(Gui, "ccad_selection_observer"):
         try:
@@ -558,6 +648,16 @@ def setup():
     
     Gui.ccad_pickadd_filter = AdditiveSelectionFilter()
     app.installEventFilter(Gui.ccad_pickadd_filter)
+
+def _attach_viewport(mw, retries=0):
+    """Βρες το viewport. Αν δεν είναι ακόμα έτοιμο, ξαναδοκίμασε."""
+    target = next((w for w in mw.findChildren(QtWidgets.QWidget)
+                   if "View3DInventor" in w.metaObject().className() and w.isVisible()), None)
+    if target:
+        Gui.ccad_sel_logic = CCADSelectionLogic(target)
+        App.Console.PrintLog("ClassicCAD Selection: Viewport attached.\n")
+    elif retries < 10:
+        QtCore.QTimer.singleShot(500, lambda: _attach_viewport(mw, retries + 1))
 
 def tear_down():
     if hasattr(Gui, "ccad_sel_logic"):

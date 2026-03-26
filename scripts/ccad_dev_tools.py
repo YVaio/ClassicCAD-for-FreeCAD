@@ -44,12 +44,16 @@ def reload_classic_cad():
     
     # Η λίστα των modules
     modules_to_reload = [
+        "ccad_cmd_xline",
+        "ccad_cmd_trim",
+        "ccad_cmd_join",
         "ccad_console",
         "ccad_cursor",
         "ccad_selection",
         "ccad_draft_tools",
         "ccad_layers",
-        "ccad_dev_tools" # Πρέπει να είναι τελευταίο
+        "ccad_status_bar",
+        "ccad_dev_tools" # Must be last
     ]
 
     # 1. ΚΑΘΑΡΙΣΜΟΣ EVENT FILTERS (Πριν το tear_down)
