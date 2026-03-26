@@ -74,10 +74,12 @@ class CCADSelectionLogic(QtCore.QObject):
         self.box.hide()
 
     def eventFilter(self, obj, event):
-        # Let XLINE/TRIM handlers take over when active
+        # Let XLINE/TRIM/FILLET handlers take over when active
         if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
             return False
         if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+            return False
+        if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
             return False
 
         # --- LEFT PRESS ---
@@ -299,7 +301,7 @@ class AutoSelectionBlocker:
             if obj.Proxy.__class__.__name__ != 'Rectangle':
                 return
             
-            import Draft
+            import Draft, ccad_layers
             p = obj.Placement
             h = float(obj.Height)
             l = float(obj.Length)
@@ -312,19 +314,33 @@ class AutoSelectionBlocker:
                 App.Vector(l, h, 0),
                 App.Vector(0, h, 0),
             ]
-            # Εφαρμογή rotation και μετατόπιση
             pts = [rot.multVec(pt) + base for pt in pts]
             
-            # Αντιγραφή visual properties πριν τη διαγραφή
+            # Grab layer and visual properties before deleting
             layer = getattr(obj, 'Layer', None)
+            if not layer:
+                layer = ccad_layers.get_active_layer(doc)
+            lc = None
+            lw = None
+            if hasattr(obj, 'ViewObject') and obj.ViewObject:
+                lc = getattr(obj.ViewObject, 'LineColor', None)
+                lw = getattr(obj.ViewObject, 'LineWidth', None)
             
-            # Διαγραφή rectangle
             doc.removeObject(obj.Name)
             
-            # Δημιουργία Wire
             wire = Draft.make_wire(pts, closed=True, face=False)
-            if layer and hasattr(wire, 'Layer'):
-                wire.Layer = layer
+            # Assign to active layer
+            if layer and hasattr(layer, 'addObject'):
+                try:
+                    layer.addObject(wire)
+                except Exception:
+                    pass
+            # Transfer visual properties
+            if wire and hasattr(wire, 'ViewObject') and wire.ViewObject:
+                if lc is not None:
+                    wire.ViewObject.LineColor = lc
+                if lw is not None:
+                    wire.ViewObject.LineWidth = lw
             
             doc.recompute()
         except Exception:
@@ -469,6 +485,8 @@ class AdditiveSelectionFilter(QtCore.QObject):
         if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
             return False
         if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+            return False
+        if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
             return False
 
         if event.type() == QtCore.QEvent.Type.KeyPress and event.key() == QtCore.Qt.Key_Escape:

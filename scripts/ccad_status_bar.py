@@ -34,9 +34,11 @@ class ClassicStatusBar(QtCore.QObject):
                 sz = target_tb.iconSize()
                 self.ortho_btn = QtGui.QAction(self.mw)
                 self.ortho_btn.setCheckable(True)
-                self.ortho_btn.setChecked(False)
+                import ccad_draft_tools
+                saved = ccad_draft_tools.ClassicDraftTools._ortho_enabled
+                self.ortho_btn.setChecked(saved)
                 self.ortho_btn.setToolTip("Toggle Ortho mode (F8)")
-                self.ortho_btn.setIcon(self._make_icon(False, sz.width()))
+                self.ortho_btn.setIcon(self._make_icon(saved, sz.width()))
                 self.ortho_btn.toggled.connect(self._on_ortho)
                 self._icon_sz = sz.width()
 

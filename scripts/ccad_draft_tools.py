@@ -4,20 +4,48 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 _original_snap = None
 
+_ORTHO_SUSPEND_CMDS = ('Rectangle',)
+
+
 def _ortho_snap(self, screenpos, lastpoint=None, active=True, constrain=False, noTracker=False):
-    """Patched Snapper.snap: forces constrain when F8 ortho is ON."""
+    """Patched Snapper.snap: forces ortho when F8 is ON.
+
+    Uses FreeCAD's native constraint so the rubberband/tracker draws along
+    the ortho axis.  After snapping, if the snapper detected a real object
+    snap (endpoint, midpoint, …) the point is re-snapped without constraint
+    so the snap wins over ortho — both visually and in the returned value.
+    """
     try:
         if ClassicDraftTools._ortho_enabled and lastpoint is not None:
-            constrain = True
-            self.constraintAxis = None
-            self.affinity = None
+            cmd = getattr(App, 'activeDraftCommand', None)
+            cmd_name = cmd.__class__.__name__ if cmd else ''
+            if cmd_name not in _ORTHO_SUSPEND_CMDS:
+                # Reset constraint state for a clean ortho pass
+                self.constraintAxis = None
+                self.affinity = None
+                # Snap WITH constraint — gives proper ortho rubberband
+                pt = _original_snap(self, screenpos, lastpoint=lastpoint,
+                                    active=active, constrain=True,
+                                    noTracker=noTracker)
+                # If the snapper found a real object snap, re-snap freely
+                si = getattr(self, 'snapInfo', None)
+                if si and isinstance(si, dict) and si.get('Object'):
+                    return _original_snap(self, screenpos,
+                                          lastpoint=lastpoint,
+                                          active=active, constrain=False,
+                                          noTracker=noTracker)
+                return pt
     except Exception:
         pass
-    return _original_snap(self, screenpos, lastpoint=lastpoint, active=active, constrain=constrain, noTracker=noTracker)
+    return _original_snap(self, screenpos, lastpoint=lastpoint,
+                          active=active, constrain=constrain,
+                          noTracker=noTracker)
 
+
+_PREF_GROUP = "User parameter:BaseApp/Preferences/Mod/ClassicCAD"
 
 class ClassicDraftTools(QtCore.QObject):
-    _ortho_enabled = False
+    _ortho_enabled = App.ParamGet(_PREF_GROUP).GetBool("OrthoEnabled", False)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,6 +108,7 @@ class ClassicDraftTools(QtCore.QObject):
     def toggle_ortho(self):
         try:
             ClassicDraftTools._ortho_enabled = not ClassicDraftTools._ortho_enabled
+            App.ParamGet(_PREF_GROUP).SetBool("OrthoEnabled", ClassicDraftTools._ortho_enabled)
             state = "ON" if ClassicDraftTools._ortho_enabled else "OFF"
             self.print_msg(f"< ORTHO {state} >")
             # Sync the status bar button

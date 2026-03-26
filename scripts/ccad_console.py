@@ -13,6 +13,8 @@ def _handler_active():
         return True
     if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
         return True
+    if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
+        return True
     return False
 
 
@@ -69,7 +71,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'TRIM': 'TRIM_CCAD',
             'EXTEND': 'EXTEND_CCAD',
             'OFFSET': 'Draft_Offset',
-            'FILLET': 'Draft_Fillet',
+            'FILLET': 'FILLET_CCAD',
             'ARRAY': 'Draft_Array',
             'ERASE': 'Std_Delete',
             'EXPLODE': 'EXPLODE_CCAD',
@@ -146,6 +148,14 @@ class ClassicConsole(QtWidgets.QDockWidget):
             handler._on_input()
             return
 
+        # Fillet handler only intercepts when waiting for radius or R input
+        fillet = getattr(Gui, 'ccad_fillet_handler', None)
+        if fillet and hasattr(fillet, '_on_input'):
+            text = self.input.text().strip().upper()
+            if fillet._waiting_radius or text == 'R':
+                fillet._on_input()
+                return
+
         raw_text = self.input.text().strip().upper()
 
         if not raw_text:
@@ -179,6 +189,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
         self.history.moveCursor(QtGui.QTextCursor.End)
 
     def _dispatch(self, freecad_cmd):
+        # Clean up any active interactive handlers before starting a new command
+        self._cleanup_handlers()
+
         # ── REGEN ──
         if freecad_cmd == 'REGEN_CCAD':
             import ccad_dev_tools, importlib
@@ -194,7 +207,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
                      'Draft_Move', 'Draft_Copy', 'Draft_Rotate', 'Draft_Scale',
-                     'Draft_Mirror', 'Draft_Offset', 'Draft_Fillet', 'Std_Delete')
+                     'Draft_Mirror', 'Draft_Offset', 'Std_Delete')
         if freecad_cmd not in _keep_sel:
             self._auto_deselect()
 
@@ -214,10 +227,22 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ccad_cmd_xline.run(self, opt)
             return
 
+        # ── ERASE — close Draft_Edit grips first to avoid stale markers ──
+        if freecad_cmd == 'Std_Delete':
+            self._close_grips()
+            Gui.runCommand('Std_Delete')
+            Gui.Selection.clearSelection()
+            return
+
         # ── TRIM / EXTEND ──
         if freecad_cmd in ('TRIM_CCAD', 'EXTEND_CCAD'):
             mode = 'TRIM' if freecad_cmd == 'TRIM_CCAD' else 'EXTEND'
             ccad_cmd_trim.run(self, mode)
+            return
+
+        # ── FILLET ──
+        if freecad_cmd == 'FILLET_CCAD':
+            ccad_cmd_trim.run_fillet(self)
             return
 
         # ── Layer commands ──
@@ -236,6 +261,26 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── Standard FreeCAD / Draft commands ──
         Gui.getMainWindow().setFocus()
         Gui.runCommand(freecad_cmd)
+
+    def _cleanup_handlers(self):
+        """Clean up any active interactive handlers."""
+        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler'):
+            handler = getattr(Gui, attr, None)
+            if handler and hasattr(handler, 'cleanup'):
+                handler.cleanup()
+
+    def _close_grips(self):
+        """Close Draft_Edit to remove grip markers from the viewport."""
+        try:
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                cls = App.activeDraftCommand.__class__.__name__ or ''
+                if 'Edit' in cls:
+                    Gui.Control.closeDialog()
+        except Exception:
+            pass
+        blocker = getattr(Gui, 'ccad_auto_blocker', None)
+        if blocker:
+            blocker._gripped_objects = []
 
     def _auto_deselect(self):
         """Clear selection and grips before starting a new command."""
@@ -306,7 +351,21 @@ class ClassicConsole(QtWidgets.QDockWidget):
     # ── app-level event filter ────────────────
 
     def eventFilter(self, obj, event):
+        # Block Space shortcut to prevent Std_ToggleVisibility from hiding objects
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Space:
+            fw = QtWidgets.QApplication.focusWidget()
+            if not isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
+                event.accept()
+                return True
+
         if event.type() == QtCore.QEvent.KeyPress:
+            # Delete key: close grips first so markers are cleaned up
+            if event.key() == QtCore.Qt.Key_Delete:
+                self._close_grips()
+                Gui.runCommand('Std_Delete')
+                Gui.Selection.clearSelection()
+                return True
+
             fw = QtWidgets.QApplication.focusWidget()
             is_input = isinstance(fw, (QtWidgets.QLineEdit,
                                        QtWidgets.QDoubleSpinBox,
@@ -333,6 +392,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
                     return True
 
                 if _handler_active():
+                    # Block Space to prevent Std_ToggleVisibility hiding objects
+                    if event.key() == QtCore.Qt.Key_Space:
+                        return True
                     return False
 
                 self.execute(force_repeat=True)

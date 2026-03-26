@@ -4,7 +4,7 @@ from PySide6 import QtCore
 import Draft
 
 def get_active_layer(doc):
-    """Βρίσκει το ενεργό layer ή επιστρέφει το Layer 0 ως προεπιλογή"""
+    """Return the active layer, falling back to Layer 0."""
     param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
     layer_name = param.GetString("CurrentLayer", "")
     
@@ -12,15 +12,38 @@ def get_active_layer(doc):
         layer = doc.getObject(layer_name)
         if layer: return layer
         
-    # Αν δεν υπάρχει ενεργό, ψάχνουμε το Layer "0"
+    # Fall back to Layer "0"
     return next((o for o in doc.Objects if o.Label == "0" or o.Name == "Layer0"), None)
+
+
+def _activate_layer_zero(doc):
+    """Set Layer 0 as the active/autogroup layer in the Draft toolbar."""
+    if not doc:
+        return
+    l0 = next((o for o in doc.Objects if o.Label == "0" or o.Name == "Layer0"), None)
+    if not l0:
+        return
+    try:
+        param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        param.SetString("CurrentLayer", l0.Name)
+    except Exception:
+        pass
+    try:
+        if hasattr(Gui, 'draftToolBar'):
+            tb = Gui.draftToolBar
+            if hasattr(tb, 'setAutoGroup'):
+                tb.setAutoGroup(l0.Name)
+            elif hasattr(tb, 'autogroup'):
+                tb.autogroup = l0.Name
+    except Exception:
+        pass
+
 
 class LayerZeroManager:
     @staticmethod
     def ensure_layer_zero_and_activate(doc):
         if not doc: return
             
-        # Πιο ευρύς έλεγχος για να μην δημιουργεί διπλά layers
         l0 = None
         for o in doc.Objects:
             if o.Label == "0" or o.Name == "Layer0":
@@ -41,23 +64,33 @@ class LayerZeroManager:
                 return
 
         if l0:
-            try:
-                param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
-                param.SetString("CurrentLayer", l0.Name)
-                if hasattr(Gui, "draftToolBar") and hasattr(Gui.draftToolBar, "layerUI"):
-                    Gui.draftToolBar.layerUI.update()
-            except: pass
+            _activate_layer_zero(doc)
+
 
 class DocumentObserver:
     def slotCreatedDocument(self, doc):
         QtCore.QTimer.singleShot(2000, lambda: LayerZeroManager.ensure_layer_zero_and_activate(doc))
 
+    def slotActivateDocument(self, doc_name):
+        """When switching to a document, ensure Layer 0 is active."""
+        QtCore.QTimer.singleShot(500, lambda: self._activate_on_switch(doc_name))
+
+    def _activate_on_switch(self, doc_name):
+        try:
+            doc = App.getDocument(doc_name)
+            if doc:
+                _activate_layer_zero(doc)
+        except Exception:
+            pass
+
     def slotCreatedObject(self, obj):
         if not obj or not hasattr(obj, "Name"):
             return
             
-        # Αγνοούμε τη δημιουργία του ίδιου του layer ή άλλων groups για να μην έχουμε λούπες
+        # Skip layers, groups, and origin objects
         if obj.Label == "0" or obj.Name.startswith("Layer") or "Group" in obj.TypeId:
+            return
+        if obj.TypeId in ('App::Origin', 'App::Line', 'App::Plane'):
             return
             
         obj_name = obj.Name
