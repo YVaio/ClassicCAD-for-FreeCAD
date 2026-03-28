@@ -6,6 +6,7 @@ So, if any of you have the expertise, will and time, please do contribute!
 
 !BEWARE!
 This addon edits the environment and functionality of FreeCAD as a whole, it is not a separate workbench, as it made my life difficult a bit to do so and without many bugs.
+However, in the future I plan to make it a separate workbench not affecting any default FreeCAD functionality and user preferences outside of it.
 
 INSTRUCTIONS
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside %APPDATA%\FreeCAD/v1-1/Mod/ClassicCAD
