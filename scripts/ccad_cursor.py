@@ -115,6 +115,11 @@ class ClassicCursor(QtWidgets.QWidget):
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
         busy = self.is_busy() or self._is_orbiting_or_panning
         
+        # --- ΠΡΟΣΘΗΚΗ: Έλεγχος για λειτουργία Pickbox-only (Trim/Fillet) ---
+        is_pickbox_cmd = bool(getattr(Gui, 'ccad_trim_handler', None) or 
+                              getattr(Gui, 'ccad_fillet_handler', None))
+        # ------------------------------------------------------------------
+
         alpha = 255 
         col_w = QtGui.QColor(205, 205, 205, alpha)
         
@@ -132,17 +137,20 @@ class ClassicCursor(QtWidgets.QWidget):
         
         gap = 0 if busy else 5
         
-        for vx, vy, col, dot in axes_data:
-            if dot > 0.999999999: continue 
-            mag = (vx**2 + vy**2)**0.5
-            if mag > 0.000000001:
-                unit = QtCore.QPointF(vx, vy) / mag
-                painter.setPen(QtGui.QPen(col, 0))
-                p_c = QtCore.QPointF(mx, my)
-                painter.drawLine(p_c + unit * gap, p_c + unit * 10000)
-                painter.drawLine(p_c - unit * gap, p_c - unit * 10000)
+        # Ζωγραφίζουμε τις γραμμές ΜΟΝΟ αν δεν είμαστε σε Trim/Fillet mode
+        if not is_pickbox_cmd:
+            for vx, vy, col, dot in axes_data:
+                if dot > 0.999999999: continue 
+                mag = (vx**2 + vy**2)**0.5
+                if mag > 0.000000001:
+                    unit = QtCore.QPointF(vx, vy) / mag
+                    painter.setPen(QtGui.QPen(col, 0))
+                    p_c = QtCore.QPointF(mx, my)
+                    painter.drawLine(p_c + unit * gap, p_c + unit * 10000)
+                    painter.drawLine(p_c - unit * gap, p_c - unit * 10000)
 
-        if not busy:
+        # Ζωγραφίζουμε το Pickbox αν η εφαρμογή είναι idle Η αν τρέχει Trim/Fillet
+        if not busy or is_pickbox_cmd:
             painter.setPen(QtGui.QPen(QtCore.Qt.white, 0))
             painter.drawRect(mx-5, my-5, 10, 10)
 
