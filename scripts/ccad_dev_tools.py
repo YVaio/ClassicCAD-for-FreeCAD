@@ -5,34 +5,45 @@ import FreeCADGui as Gui
 from PySide6 import QtWidgets, QtCore
 
 def REGEN():
-    """Εντολή REGEN: Δυναμική εξομάλυνση βάσει Camera Height (Orthographic)"""
+    """Εντολή REGEN: Δυναμική εξομάλυνση και επαναϋπολογισμός σύνθετης γεωμετρίας (Splines, Beziers, κλπ)."""
     try:
         doc = App.ActiveDocument
         if not doc: return
         view = Gui.activeView()
         if not view: return
 
+        # Υπολογισμός Camera Height για Orthographic
         camera = view.getCameraNode()
-        if hasattr(camera, "height"):
-            visible_height = camera.height.getValue()
-        else:
-            visible_height = 100
+        visible_height = camera.height.getValue() if hasattr(camera, "height") else 100
 
+        # Δυναμικό Deviation βάσει zoom (όσο πιο κοντά, τόσο πιο μικρό deviation = πιο ομαλό)
         dynamic_deviation = visible_height * 0.001
         if dynamic_deviation < 0.0005: dynamic_deviation = 0.0005
 
-        # Ρύθμιση Deviation για όλα τα αντικείμενα
+        # Τύποι που αγνοούμε (απλές γραμμές και σημεία) για ταχύτητα
+        simple_types = ('Part::Line', 'App::Origin', 'App::Plane')
+
         for obj in doc.Objects:
-            if hasattr(obj, 'ViewObject') and obj.ViewObject:
-                vo = obj.ViewObject
-                if hasattr(vo, "Deviation"):
-                    vo.Deviation = dynamic_deviation
-                if hasattr(vo, "AngularDeflection"):
-                    vo.AngularDeflection = dynamic_deviation * 10
+            # 1. Έλεγχος αν το αντικείμενο έχει Shape (άρα είναι γεωμετρία)
+            if hasattr(obj, "Shape"):
+                
+                # 2. Αν δεν είναι απλή γραμμή, το μαρκάρουμε για πλήρη αναγέννηση
+                # Αυτό επιβάλλει στις Splines/Beziers να ξαναφτιάξουν το πλέγμα τους
+                if obj.TypeId not in simple_types:
+                    obj.touch() 
+
+                # 3. Ρύθμιση Deviation στο ViewObject για οπτική εξομάλυνση
+                if hasattr(obj, 'ViewObject') and obj.ViewObject:
+                    vo = obj.ViewObject
+                    if hasattr(vo, "Deviation"):
+                        vo.Deviation = dynamic_deviation
+                    if hasattr(vo, "AngularDeflection"):
+                        vo.AngularDeflection = dynamic_deviation * 10
         
+        # 4. Επαναϋπολογισμός και ανανέωση οθόνης
         doc.recompute()
         Gui.updateGui()
-        App.Console.PrintLog(f"REGEN: Done (Deviation: {dynamic_deviation:.4f})\n")
+        App.Console.PrintLog(f"REGEN: Done. Complex geometry smoothed (Deviation: {dynamic_deviation:.4f})\n")
     except Exception as e:
         App.Console.PrintError(f"REGEN Error: {str(e)}\n")
 
