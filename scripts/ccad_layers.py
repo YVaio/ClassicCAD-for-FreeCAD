@@ -22,31 +22,32 @@ def ensure_layer_0(doc):
             doc.recompute()
         except Exception: return
 
-    # Επιβολή 1px πάχους στο Layer 0
+    # Επιβολή 1px πάχους στο Layer 0 & λευκό χρώμα
     if l0 and hasattr(l0, "ViewObject") and l0.ViewObject:
+        l0.ViewObject.LineColor = (1.0, 1.0, 1.0)
         if hasattr(l0.ViewObject, "LineWidth"):
             l0.ViewObject.LineWidth = 1.0
 
-    # Ενεργοποίηση αν δεν υπάρχει επιλεγμένο layer
+    # Ενεργοποίηση και ενημέρωση UI
     p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
-    if not p.GetString("CurrentLayer", "") and l0:
-        p.SetString("CurrentLayer", l0.Name)
-        if hasattr(Gui, 'draftToolBar'):
-            if hasattr(Gui.draftToolBar, 'setAutoGroup'): Gui.draftToolBar.setAutoGroup(l0.Name)
-            elif hasattr(Gui.draftToolBar, 'autogroup'): Gui.draftToolBar.autogroup = l0.Name
+    p.SetString("CurrentLayer", l0.Name)
+    
+    if hasattr(Gui, 'draftToolBar'):
+        try:
+            if hasattr(Gui.draftToolBar, 'setAutoGroup'): 
+                Gui.draftToolBar.setAutoGroup(l0.Name)
+            elif hasattr(Gui.draftToolBar, 'autogroup'): 
+                Gui.draftToolBar.autogroup = l0.Name
+        except Exception: pass
 
 class DocumentObserver:
     def slotCreatedDocument(self, doc):
-        ensure_layer_0(doc)
-        QtCore.QTimer.singleShot(2000, lambda: ensure_layer_0(doc))
+        QtCore.QTimer.singleShot(500, lambda: ensure_layer_0(doc))
 
-    def slotActivateDocument(self, doc_name):
-        QtCore.QTimer.singleShot(500, lambda: self._activate_on_switch(doc_name))
-
-    def _activate_on_switch(self, doc_name):
+    def slotActivateDocument(self, doc_ptr):
+        # Στο 1.1 το slot δίνει το ίδιο το object, όχι το όνομα
         try:
-            # Στο 1.1 το doc_name μπορεί να είναι το ίδιο το αντικείμενο Document
-            doc = doc_name if not isinstance(doc_name, str) else App.getDocument(doc_name)
+            doc = doc_ptr if not isinstance(doc_ptr, str) else App.getDocument(doc_ptr)
             if doc: ensure_layer_0(doc)
         except Exception: pass
 
@@ -54,19 +55,21 @@ class DocumentObserver:
         if not obj or not hasattr(obj, "Name"): return
 
         # Επιβολή 1px σε οποιοδήποτε νέο Layer δημιουργείται
-        if "Layer" in obj.TypeId or obj.Name.startswith("Layer"):
-            def set_lw():
-                if hasattr(obj, "ViewObject") and obj.ViewObject:
-                    if hasattr(obj.ViewObject, "LineWidth"):
-                        obj.ViewObject.LineWidth = 1.0
-            QtCore.QTimer.singleShot(200, set_lw)
+        if obj.TypeId == "App::DocumentObjectGroup" or "Layer" in obj.TypeId or obj.Name.startswith("Layer"):
+            def set_lw(name):
+                o = App.ActiveDocument.getObject(name)
+                if o and hasattr(o, "ViewObject") and o.ViewObject:
+                    if hasattr(o.ViewObject, "LineWidth"):
+                        o.ViewObject.LineWidth = 1.0
+            QtCore.QTimer.singleShot(200, lambda n=obj.Name: set_lw(n))
             return
 
         if obj.Label == "0" or obj.Name.startswith("Layer") or "Group" in obj.TypeId: return
         if obj.TypeId in ('App::Origin', 'App::Line', 'App::Plane'): return
 
         obj_name = obj.Name
-        QtCore.QTimer.singleShot(250, lambda: self.move_to_active_layer(obj_name))
+        # Αυξημένος χρόνος στα 500ms για να προλάβει το Rectangle να φτιάξει το Wire του
+        QtCore.QTimer.singleShot(500, lambda: self.move_to_active_layer(obj_name))
 
     def move_to_active_layer(self, obj_name):
         doc = App.ActiveDocument
@@ -81,7 +84,7 @@ class DocumentObserver:
         objects_to_move = [obj]
         if hasattr(obj, "OutList"):
             for child in obj.OutList:
-                if child and hasattr(child, "TypeId") and child.TypeId not in ('App::Origin', 'App::Plane', 'App::Line'):
+                if child and child.TypeId not in ('App::Origin', 'App::Plane', 'App::Line'):
                     objects_to_move.append(child)
 
         for item in objects_to_move:
@@ -96,36 +99,31 @@ class DocumentObserver:
                 except Exception: pass
 
 def setup():
-    # Καθαρισμός παλιού Observer
     if hasattr(Gui, "ccad_layer_observer"):
         try:
             App.removeDocumentObserver(Gui.ccad_layer_observer)
             del Gui.ccad_layer_observer
         except: pass
 
-    # Εγκατάσταση Observer
     Gui.ccad_layer_observer = DocumentObserver()
     App.addDocumentObserver(Gui.ccad_layer_observer)
 
-    # Patch για το Task Dialog Crash (Active task dialog found)
+    # Patch για το Task Dialog Crash
     try:
         from draftguitools import gui_setstyle
         if hasattr(gui_setstyle, "Draft_SetStyle") and not hasattr(gui_setstyle.Draft_SetStyle, "_ccad_patched"):
             orig_activated = gui_setstyle.Draft_SetStyle.Activated
-            
             def patched_activated(self, *args, **kwargs):
-                # Αν υπάρχει ανοιχτό dialog, κλείσ' το πριν ανοίξεις το SetStyle
                 if Gui.Control.activeDialog():
                     Gui.Control.closeDialog()
                 return orig_activated(self, *args, **kwargs)
-                
             gui_setstyle.Draft_SetStyle.Activated = patched_activated
             gui_setstyle.Draft_SetStyle._ccad_patched = True
-    except Exception:
-        pass
+    except Exception: pass
 
+    # Εκκίνηση: Εξασφάλιση Layer 0 με καθυστέρηση για να είναι έτοιμο το UI
     if App.ActiveDocument:
-        ensure_layer_0(App.ActiveDocument)
+        QtCore.QTimer.singleShot(1000, lambda: ensure_layer_0(App.ActiveDocument))
 
 setup()
 
