@@ -5,7 +5,7 @@ Unfortunately, I am no programmer, I also just recently used gitHub for the firs
 So, if any of you have the expertise, will and time, please do contribute!
 
 !BEWARE!
-This addon edits the environment and functionality of FreeCAD as a whole, even though it is its own workbench. I haven't managed to make it unload automatically after you change workbench.
+ClassicCAD works as a Draft clone initially, so they are interconnected and when the mod is loaded the first time each session, it migrates everything to Draft as well. The rest of the workbenches stay intact (as far as I know).
 
 INSTRUCTIONS
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside %APPDATA%\FreeCAD/v1-1/Mod/ClassicCAD
