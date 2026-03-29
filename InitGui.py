@@ -2,19 +2,35 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import os
 import sys
-import importlib
 
-# --- 1. DYNAMIC PATH FIX ---
-# Gets the exact folder where InitGui.py lives, avoiding GitHub "-main" folder naming issues.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-scripts_dir = os.path.join(current_dir, "scripts")
+# --- 1. DYNAMIC PATH FIX (GitHub ZIP Safe) ---
+current_dir = None
+try:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    mod_base = os.path.join(App.getUserAppDataDir(), "Mod")
+    if os.path.exists(mod_base):
+        for folder in os.listdir(mod_base):
+            if "ClassicCAD" in folder:  
+                test_dir = os.path.join(mod_base, folder)
+                if os.path.exists(os.path.join(test_dir, "scripts")):
+                    current_dir = test_dir
+                    break
 
-if os.path.exists(scripts_dir) and scripts_dir not in sys.path:
-    sys.path.append(scripts_dir)
+if current_dir:
+    scripts_dir = os.path.join(current_dir, "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.append(scripts_dir)
+else:
+    App.Console.PrintError("ClassicCAD: Failed to locate the mod folder.\n")
+
 
 # --- 2. GLOBAL SETUP FUNCTIONS ---
 def silent_top_view():
+    import FreeCAD as App
+    import FreeCADGui as Gui
     from PySide6 import QtCore
+    
     view = Gui.activeView()
     if view:
         view.setCameraType("Orthographic")
@@ -22,59 +38,49 @@ def silent_top_view():
         view.setCameraOrientation(App.Rotation(App.Vector(0,0,1), 0))
         App.Console.PrintLog("ClassicCAD: Global Initial Top View Forced.\n")
     else:
-        # Reference the function via the Gui object to avoid NameError
         QtCore.QTimer.singleShot(500, Gui.ccad_silent_top_view)
 
-# Assign to Gui to prevent garbage collection/scope loss
 Gui.ccad_silent_top_view = silent_top_view
 
-active_modules = [
-    "ccad_console",
-    "ccad_cursor",
-    "ccad_selection",
-    "ccad_draft_tools",
-    "ccad_layers",
-    "ccad_status_bar",
-    "ccad_dev_tools"
-]
 
-# --- 3. WORKBENCH REGISTRATION ---
-class ClassicCADWorkbench(Gui.Workbench):
-    MenuText = "ClassicCAD"
-    ToolTip = "AutoCAD-like workflow for FreeCAD"
+# --- 3. INITIALIZATION ROUTINE ---
+def startup_classic_cad():
+    # Εισαγωγή των modules ΕΔΩ ΜΕΣΑ για να μην χαθούν ποτέ από το scope του Timer
+    import FreeCAD as App
+    import FreeCADGui as Gui
+    import sys
+    import importlib
     
-    # Optional: If you have an icon, uncomment and point to it here
-    # Icon = os.path.join(current_dir, "Resources", "icons", "ClassicCAD.svg")
+    active_modules = [
+        "ccad_console",
+        "ccad_cursor",
+        "ccad_selection",
+        "ccad_draft_tools",
+        "ccad_layers",
+        "ccad_status_bar",
+        "ccad_dev_tools"
+    ]
+    
+    if not hasattr(Gui, "ccad_initialized"):
+        Gui.ccad_initialized = True
+        
+        for mod_name in active_modules:
+            try:
+                if mod_name in sys.modules:
+                    module = importlib.reload(sys.modules[mod_name])
+                else:
+                    module = importlib.import_module(mod_name)
+                
+                if hasattr(module, "setup"):
+                    module.setup()
+                App.Console.PrintLog(f"ClassicCAD: Loaded {mod_name} globally.\n")
+            except Exception as e:
+                App.Console.PrintError(f"ClassicCAD Error loading {mod_name}: {e}\n")
 
-    def Initialize(self):
-        """This runs once when FreeCAD starts and loads the Workbench."""
-        if not hasattr(Gui, "ccad_initialized"):
-            Gui.ccad_initialized = True
-            
-            for mod_name in active_modules:
-                try:
-                    if mod_name in sys.modules:
-                        module = importlib.reload(sys.modules[mod_name])
-                    else:
-                        module = importlib.import_module(mod_name)
-                    
-                    if hasattr(module, "setup"):
-                        module.setup()
-                    App.Console.PrintLog(f"ClassicCAD: Loaded {mod_name} globally.\n")
-                except Exception as e:
-                    App.Console.PrintError(f"ClassicCAD Error loading {mod_name}: {e}\n")
+        from PySide6 import QtCore
+        QtCore.QTimer.singleShot(1000, Gui.ccad_silent_top_view)
 
-            # Trigger the view setup
-            from PySide6 import QtCore
-            QtCore.QTimer.singleShot(1000, Gui.ccad_silent_top_view)
 
-    def Activated(self):
-        """Runs when the user switches to the ClassicCAD workbench in the UI."""
-        pass
-
-    def Deactivated(self):
-        """Runs when the user switches away from the ClassicCAD workbench."""
-        pass
-
-# Add the workbench to FreeCAD
-Gui.addWorkbench(ClassicCADWorkbench())
+# Καθυστερούμε την εκκίνηση για να σιγουρευτούμε ότι το FreeCAD MainWindow έχει φορτώσει
+from PySide6 import QtCore
+QtCore.QTimer.singleShot(2000, startup_classic_cad)
