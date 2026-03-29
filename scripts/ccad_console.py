@@ -284,7 +284,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         # ── FILLET ──
         if freecad_cmd == 'FILLET_CCAD':
-            ccad_cmd_trim.run_fillet(self)
+            import ccad_cmd_fillet
+            ccad_cmd_fillet.run(self)
             return
 
         # ── Layer commands ──
