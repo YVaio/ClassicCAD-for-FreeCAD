@@ -10,3 +10,6 @@ When the mod is loaded the first time each session, it migrates everything to Dr
 
 INSTRUCTIONS
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside %APPDATA%\FreeCAD/v1-1/Mod/ClassicCAD
+
+
+works with stable version [b]1.1[/b]
