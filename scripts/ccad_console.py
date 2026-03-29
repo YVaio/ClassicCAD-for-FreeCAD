@@ -5,6 +5,7 @@ import ccad_layers
 import ccad_cmd_xline
 import ccad_cmd_trim
 import ccad_cmd_join
+import ccad_cmd_spline
 
 
 def _handler_active():
@@ -14,6 +15,8 @@ def _handler_active():
     if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
         return True
     if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
+        return True
+    if hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler:
         return True
     return False
 
@@ -54,6 +57,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'XL': 'XLINE',
             'XLH': 'XLINEH',
             'XLV': 'XLINEV',
+            'SPL': 'SPLINE',
         }
 
         self.commands = {
@@ -85,6 +89,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'XLINE': 'XLINE_CCAD',
             'XLINEH': 'XLINEH_CCAD',
             'XLINEV': 'XLINEV_CCAD',
+            'SPLINE': 'SPLINE_CCAD',
         }
 
         self.last_command = None
@@ -147,6 +152,12 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if handler and hasattr(handler, '_on_input'):
             handler._on_input()
             return
+        
+        spline = getattr(Gui, 'ccad_spline_handler', None)
+        if spline and hasattr(spline, '_on_input'):
+            # Αν ο handler αναγνωρίσει το CV ή το F, επιστρέφει True και σταματάμε εδώ.
+            if spline._on_input():
+                return
 
         # Fillet handler only intercepts when waiting for radius or R input
         fillet = getattr(Gui, 'ccad_fillet_handler', None)
@@ -171,6 +182,16 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         clean_input = raw_text.split(' ')[0]
         cmd_name = self.shortcuts.get(clean_input, clean_input)
+
+        if cmd_name == 'SPLINE':
+            self.history.append(f"<span style='color:#55ff55;'>&gt; {cmd_name}</span>")
+            self.last_command = clean_input
+            self.input.clear()
+            import ccad_cmd_spline    # (ή σιγουρέψου ότι το έχεις κάνει import στην αρχή του αρχείου)
+            ccad_cmd_spline.run(self)
+            self.history.moveCursor(QtGui.QTextCursor.End)
+            return
+        
         freecad_cmd = self.commands.get(cmd_name)
 
         if freecad_cmd:
@@ -410,11 +431,13 @@ def setup():
     if not mw:
         return
 
+    # Καθαρισμός παλιάς κονσόλας
     for child in mw.findChildren(QtWidgets.QDockWidget):
         if child.objectName() == "ClassicConsole":
             QtWidgets.QApplication.instance().removeEventFilter(child)
             child.deleteLater()
 
+    # Δημιουργία νέας κονσόλας
     Gui.classic_console = ClassicConsole(mw)
     mw.addDockWidget(QtCore.Qt.BottomDockWidgetArea, Gui.classic_console)
     QtWidgets.QApplication.instance().installEventFilter(Gui.classic_console)
@@ -424,22 +447,52 @@ def setup():
             s.deleteLater()
     Gui.ccad_shortcuts = []
 
+    # --- Η ΕΞΥΠΝΗ ΣΥΝΑΡΤΗΣΗ ΠΛΗΚΤΡΟΛΟΓΗΣΗΣ ---
     def focus_and_type(char):
+        if not hasattr(Gui, "classic_console") or not Gui.classic_console:
+            return
+            
+        console_input = Gui.classic_console.input
         fw = QtWidgets.QApplication.focusWidget()
-        if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox,
-                           QtWidgets.QSpinBox)):
-            return
-        if _handler_active():
-            return
-        if hasattr(Gui, "classic_console"):
-            if Gui.classic_console._is_non_edit_command():
-                return
-            Gui.classic_console.input.setFocus()
-            Gui.classic_console.input.insert(char)
 
+        # Αν είμαστε ήδη στο command line, δεν κάνουμε τίποτα (γράφει κανονικά)
+        if fw == console_input:
+            return
+
+        is_letter = char.isalpha()
+
+        # 1. SMART FOCUS (Γράμματα): 
+        # Πάνε ΠΑΝΤΑ στην κονσόλα για να μπορείς να γράφεις εντολές/sub-options (όπως το CV)
+        if is_letter:
+            console_input.setFocus()
+            console_input.insert(char)
+            return
+
+        # 2. SMART FOCUS (Αριθμοί):
+        # Αν είσαι ήδη μέσα σε πεδίο του FreeCAD (π.χ. Length/X/Y), άσε τον αριθμό εκεί
+        if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
+            return
+
+        # Αν τρέχει κάποια εντολή (άρα το FreeCAD περιμένει συντεταγμένες), 
+        # μην τον κλέβεις, άστον να πάει στο UI του FreeCAD!
+        if _handler_active() or Gui.classic_console._is_non_edit_command():
+            return
+
+        # Αλλιώς, αν το πρόγραμμα "κάθεται", στείλε τον αριθμό στην κονσόλα
+        console_input.setFocus()
+        console_input.insert(char)
+    # ----------------------------------------
+
+    # Δημιουργία Shortcuts για Γράμματα και Αριθμούς
     for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
         s = QtGui.QShortcut(QtGui.QKeySequence(char), mw)
         s.activated.connect(lambda c=char: focus_and_type(c))
+        Gui.ccad_shortcuts.append(s)
+
+    # Δημιουργία Shortcuts για Enter/Space
+    for key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
+        s = QtGui.QShortcut(QtGui.QKeySequence(key), mw)
+        s.activated.connect(Gui.classic_console.execute)
         Gui.ccad_shortcuts.append(s)
 
 

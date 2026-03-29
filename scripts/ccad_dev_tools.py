@@ -58,6 +58,7 @@ def reload_classic_cad():
         "ccad_cmd_xline",
         "ccad_cmd_trim",
         "ccad_cmd_join",
+        "ccad_cmd_spline",
         "ccad_console",
         "ccad_cursor",
         "ccad_selection",
