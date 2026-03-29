@@ -31,7 +31,6 @@ class ClassicCursor(QtWidgets.QWidget):
         elif state == 'cross':
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CrossCursor)
         else:
-            # Εξασφάλιση ότι το viewport δείχνει κανονικό cursor
             self.viewport.unsetCursor()
         self._cursor_state = state
 
@@ -46,7 +45,6 @@ class ClassicCursor(QtWidgets.QWidget):
 
     def is_busy(self):
         try:
-            # Python-only check — avoid C++ Gui.Control calls (they cause RuntimeError spam)
             if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
                 cls_name = App.activeDraftCommand.__class__.__name__ or ''
                 if 'Edit' not in cls_name:
@@ -57,7 +55,6 @@ class ClassicCursor(QtWidgets.QWidget):
 
     @staticmethod
     def _is_draft_edit_dialog():
-        """True if the active Draft command is Draft_Edit."""
         if not hasattr(App, 'activeDraftCommand') or not App.activeDraftCommand:
             return False
         cls_name = App.activeDraftCommand.__class__.__name__ or ''
@@ -70,7 +67,6 @@ class ClassicCursor(QtWidgets.QWidget):
         return False
 
     def sync(self):
-        # Ασφαλής έλεγχος για το αν υπάρχει ενεργό workbench και view
         try:
             if not self.viewport or not self.viewport.isVisible(): return
             wb = Gui.activeWorkbench()
@@ -115,10 +111,31 @@ class ClassicCursor(QtWidgets.QWidget):
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
         busy = self.is_busy() or self._is_orbiting_or_panning
         
-        # --- ΠΡΟΣΘΗΚΗ: Έλεγχος για λειτουργία Pickbox-only (Trim/Fillet) ---
-        is_pickbox_cmd = bool(getattr(Gui, 'ccad_trim_handler', None) or 
-                              getattr(Gui, 'ccad_fillet_handler', None))
-        # ------------------------------------------------------------------
+        # --- ΑΣΦΑΛΗΣ ΕΛΕΓΧΟΣ ΓΙΑ PICKBOX-ONLY MODE ---
+        is_pickbox_cmd = False
+        
+        # 1. Έλεγχος για δικά μας εργαλεία που ζητάνε αντικείμενο
+        if getattr(Gui, 'ccad_trim_handler', None) or getattr(Gui, 'ccad_fillet_handler', None):
+            is_pickbox_cmd = True
+            
+        # 2. Έλεγχος για Global μεταβλητή
+        elif getattr(Gui, 'ccad_pickbox_only', False):
+            is_pickbox_cmd = True
+            
+        # 3. Έλεγχος για Draft εντολές (Offset, Move, Copy) που περιμένουν επιλογή αντικειμένου
+        else:
+            try:
+                if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                    cls_name = App.activeDraftCommand.__class__.__name__ or ''
+                    modify_cmds = ('Offset', 'Move', 'Copy', 'Rotate', 'Scale', 'Mirror')
+                    
+                    if any(cmd in cls_name for cmd in modify_cmds):
+                        # Αν το selection είναι άδειο, βρισκόμαστε στη φάση "Επιλογή Αντικειμένου"
+                        if len(Gui.Selection.getSelection()) == 0:
+                            is_pickbox_cmd = True
+            except:
+                pass
+        # ---------------------------------------------
 
         alpha = 255 
         col_w = QtGui.QColor(205, 205, 205, alpha)
@@ -126,9 +143,9 @@ class ClassicCursor(QtWidgets.QWidget):
         cam_dir = view.getViewDirection()
         is_ortho = (abs(cam_dir.x) > 0.999999999 or abs(cam_dir.y) > 0.999999999 or abs(cam_dir.z) > 0.999999999)
 
-        c_x = col_w if is_ortho else QtGui.QColor(205, 0, 0, alpha)
-        c_y = col_w if is_ortho else QtGui.QColor(0, 205, 0, alpha)
-        c_z = col_w if is_ortho else QtGui.QColor(0, 0, 205, alpha)
+        c_x = col_w if is_ortho else QtGui.QColor(205, 50, 50, alpha)
+        c_y = col_w if is_ortho else QtGui.QColor(50, 205, 50, alpha)
+        c_z = col_w if is_ortho else QtGui.QColor(50, 50, 205, alpha)
         
         mat = view.getCameraOrientation().toMatrix()
         axes_data = [(mat.A11, -mat.A12, c_x, abs(cam_dir.x)), 
@@ -137,7 +154,7 @@ class ClassicCursor(QtWidgets.QWidget):
         
         gap = 0 if busy else 5
         
-        # Ζωγραφίζουμε τις γραμμές ΜΟΝΟ αν δεν είμαστε σε Trim/Fillet mode
+        # Ζωγραφίζουμε τις γραμμές ΜΟΝΟ αν δεν είμαστε σε λειτουργία pickbox
         if not is_pickbox_cmd:
             for vx, vy, col, dot in axes_data:
                 if dot > 0.999999999: continue 
@@ -149,9 +166,9 @@ class ClassicCursor(QtWidgets.QWidget):
                     painter.drawLine(p_c + unit * gap, p_c + unit * 10000)
                     painter.drawLine(p_c - unit * gap, p_c - unit * 10000)
 
-        # Ζωγραφίζουμε το Pickbox αν η εφαρμογή είναι idle Η αν τρέχει Trim/Fillet
+        # Ζωγραφίζουμε το Pickbox αν η εφαρμογή είναι idle Ή αν τρέχει λειτουργία επιλογής
         if not busy or is_pickbox_cmd:
-            painter.setPen(QtGui.QPen(QtCore.Qt.white, 0))
+            painter.setPen(QtGui.QPen(QtGui.QColor(col_w), 0))
             painter.drawRect(mx-5, my-5, 10, 10)
 
 def setup():
@@ -159,7 +176,6 @@ def setup():
     if not mw: return
     tear_down()
     
-    # Χρήση του Gui object για να παραμείνει η συνάρτηση στη μνήμη κατά το startup
     def find_and_attach():
         target = None
         for w in mw.findChildren(QtWidgets.QWidget):
