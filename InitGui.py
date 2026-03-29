@@ -9,12 +9,12 @@ class ClassicCADWorkbench(Workbench):
     """
     Clean extension mode:
     - Reuse Draft's native UI by switching to Draft when this workbench is selected.
-    - Load ClassicCAD behavior only while ClassicCAD is active.
-    - Remove ClassicCAD behavior when leaving.
+    - Load ClassicCAD behavior only while the Draft UI remains active after that switch.
+    - Unload ClassicCAD behavior automatically when the user leaves Draft for another workbench.
     """
 
     MenuText = "ClassicCAD"
-    ToolTip = "Draft UI with ClassicCAD behavior loaded only while this workbench is active"
+    ToolTip = "Draft UI with ClassicCAD behavior loaded only while this mode is active"
     Icon = ""
 
     @staticmethod
@@ -45,15 +45,9 @@ class ClassicCADWorkbench(Workbench):
         self.__class__._ensure_paths()
 
     def Activated(self):
-        # Show the real native Draft UI.
+        # Switch to the real Draft workbench for the visible UI.
         try:
-            current = Gui.activeWorkbench().__class__.__name__ if Gui.activeWorkbench() else ""
-        except Exception:
-            current = ""
-
-        try:
-            if current != "DraftWorkbench":
-                Gui.activateWorkbench("DraftWorkbench")
+            Gui.activateWorkbench("DraftWorkbench")
         except Exception as exc:
             App.Console.PrintWarning(
                 "ClassicCAD: could not activate Draft UI base: %s\n" % exc
@@ -62,7 +56,9 @@ class ClassicCADWorkbench(Workbench):
         try:
             manager = self.__class__._import_manager()
             manager.activate()
-            App.Console.PrintMessage("ClassicCAD: behavior layer activated on top of Draft.\n")
+            App.Console.PrintMessage(
+                "ClassicCAD: behavior layer activated on top of Draft.\n"
+            )
         except Exception as exc:
             App.Console.PrintError(
                 "ClassicCAD: activation failed: %s\n" % exc
@@ -70,14 +66,10 @@ class ClassicCADWorkbench(Workbench):
             raise
 
     def Deactivated(self):
-        try:
-            manager = self.__class__._import_manager()
-            manager.deactivate()
-            App.Console.PrintMessage("ClassicCAD: behavior layer deactivated.\n")
-        except Exception as exc:
-            App.Console.PrintWarning(
-                "ClassicCAD: deactivate warning: %s\n" % exc
-            )
+        # In this architecture, switching to Draft immediately may prevent this
+        # method from being the primary unload path. The manager itself watches
+        # the active workbench and unloads when the user leaves Draft.
+        pass
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"

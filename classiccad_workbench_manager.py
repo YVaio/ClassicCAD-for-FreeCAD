@@ -42,6 +42,8 @@ COMMAND_MODULES = [
 _STATE = {
     "active": False,
     "loaded_modules": [],
+    "watch_timer": None,
+    "expected_ui_workbench": "DraftWorkbench",
 }
 
 
@@ -89,6 +91,11 @@ def _safe_delete_qobject(obj):
     if obj is None:
         return
     try:
+        if hasattr(obj, "stop"):
+            try:
+                obj.stop()
+            except Exception:
+                pass
         if hasattr(obj, "timer"):
             try:
                 obj.timer.stop()
@@ -174,6 +181,8 @@ def _cleanup_status_bar():
                 if bar.ortho_btn in acts:
                     tb.removeAction(bar.ortho_btn)
                     break
+        if hasattr(bar, "deleteLater"):
+            bar.deleteLater()
     except Exception:
         pass
     _safe_delete_qobject(bar)
@@ -215,6 +224,53 @@ def _cleanup_misc_handlers():
 
     if hasattr(Gui, "ccad_silent_top_view"):
         delattr(Gui, "ccad_silent_top_view")
+
+
+def _stop_watch_timer():
+    timer = _STATE.get("watch_timer")
+    if timer is not None:
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        _safe_delete_qobject(timer)
+        _STATE["watch_timer"] = None
+
+
+def _current_workbench_name():
+    try:
+        wb = Gui.activeWorkbench()
+        if wb:
+            return wb.__class__.__name__
+    except Exception:
+        pass
+    return ""
+
+
+def _check_workbench_exit():
+    if not _STATE["active"]:
+        return
+    current = _current_workbench_name()
+    expected = _STATE.get("expected_ui_workbench", "DraftWorkbench")
+    if current and current != expected:
+        App.Console.PrintMessage(
+            "ClassicCAD: detected workbench change to %s, unloading behavior layer.\n" % current
+        )
+        deactivate()
+
+
+def _start_watch_timer():
+    _stop_watch_timer()
+    if QtCore is None:
+        App.Console.PrintWarning(
+            "ClassicCAD: QtCore unavailable, automatic unload watcher not started.\n"
+        )
+        return
+    timer = QtCore.QTimer()
+    timer.setInterval(300)
+    timer.timeout.connect(_check_workbench_exit)
+    timer.start()
+    _STATE["watch_timer"] = timer
 
 
 def _fallback_cleanup():
@@ -261,8 +317,10 @@ def activate():
 
         _STATE["active"] = True
         _STATE["loaded_modules"] = loaded
+        _start_watch_timer()
     except Exception:
         _fallback_cleanup()
+        _stop_watch_timer()
         _STATE["active"] = False
         _STATE["loaded_modules"] = []
         raise
@@ -271,6 +329,7 @@ def activate():
 def deactivate():
     if not _STATE["active"]:
         _fallback_cleanup()
+        _stop_watch_timer()
         return
 
     for mod_name in reversed(MODULES):
@@ -279,6 +338,7 @@ def deactivate():
             _call_teardown(module)
 
     _fallback_cleanup()
+    _stop_watch_timer()
     _STATE["active"] = False
     _STATE["loaded_modules"] = []
     App.Console.PrintLog("ClassicCAD: deactivated\n")
