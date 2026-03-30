@@ -59,138 +59,280 @@ class SelectionBox(QtWidgets.QWidget):
 # SELECTION BOX LOGIC (Two-click mode)
 # =========================================================
 class CCADSelectionLogic(QtCore.QObject):
-    DRAG_THRESHOLD = 5
+    """
+    AutoCAD-like two-click selection box driven by Coin3D viewer callbacks.
+    """
 
     def __init__(self, viewport):
         super().__init__(viewport)
         self.viewport = viewport
         self.box = SelectionBox(viewport)
-        self.viewport.installEventFilter(self)
-        self.state = 0  # 0=idle, 1=first corner placed
+        self.state = 0
+        self.raw_start = None
+        self.raw_current = None
+        self._mouse_cb = None
+        self._move_cb = None
+        self._view = None
+        self._suppress_qt_until = 0.0
+        self._preview_names = []
+        self.box.preview_rects = []
+        self._pending_selection_names = []
+        try:
+            self.viewport.installEventFilter(self)
+        except Exception:
+            pass
+        self._install_callbacks()
+
+    def _install_callbacks(self):
+        try:
+            self._view = Gui.activeView()
+            if not self._view:
+                return
+            self._mouse_cb = self._view.addEventCallback("SoMouseButtonEvent", self._coin_mouse)
+            self._move_cb = self._view.addEventCallback("SoLocation2Event", self._coin_move)
+        except Exception as exc:
+            App.Console.PrintWarning("ClassicCAD: failed to install selection callbacks: %s\n" % exc)
+
+    def remove_callbacks(self):
+        try:
+            if self._view and self._mouse_cb:
+                self._view.removeEventCallback("SoMouseButtonEvent", self._mouse_cb)
+        except Exception:
+            pass
+        try:
+            if self._view and self._move_cb:
+                self._view.removeEventCallback("SoLocation2Event", self._move_cb)
+        except Exception:
+            pass
+        self._mouse_cb = None
+        self._move_cb = None
+        self._view = None
+
+    def eventFilter(self, obj, event):
+        try:
+            et = event.type()
+            now = time.time()
+
+            # Swallow the native Qt click/release immediately after finishing
+            # a box selection, otherwise FreeCAD may clear the selection again.
+            if now < self._suppress_qt_until:
+                if et in (
+                    QtCore.QEvent.MouseButtonPress,
+                    QtCore.QEvent.MouseButtonRelease,
+                    QtCore.QEvent.MouseButtonDblClick,
+                ):
+                    return True
+
+            # While two-click box mode is active, also swallow the normal
+            # left-click press/release path from the viewport.
+            if self.state == 1 and et in (
+                QtCore.QEvent.MouseButtonPress,
+                QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick,
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+
 
     def cancel_box(self):
         self.state = 0
+        self.raw_start = None
+        self.raw_current = None
+        self._preview_names = []
+        self.box.preview_rects = []
+        self.box.start_pos = None
+        self.box.current_pos = None
         self.box.is_active = False
         self.box.hide()
 
-    def eventFilter(self, obj, event):
-        # Let XLINE/TRIM/FILLET handlers take over when active
-        if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
-            return False
-        if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
-            return False
-        if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
-            return False
+    def _raw_to_qpoint(self, pos):
+        # Coin callback coordinates are good for picking, but in this FreeCAD build
+        # they are visually offset from the QWidget overlay. For drawing the rubber
+        # band, trust the real Qt cursor position relative to the viewport.
+        try:
+            gp = QtGui.QCursor.pos()
+            qp = self.viewport.mapFromGlobal(gp)
+            return QtCore.QPoint(int(qp.x()), int(qp.y()))
+        except Exception:
+            x, y = int(pos[0]), int(pos[1])
+            h = self.viewport.height()
+            return QtCore.QPoint(x, max(0, h - y))
 
-        # --- LEFT PRESS ---
-        if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
-            if _has_active_draft_command(): return False
+    def _qpoint_to_raw(self, pt):
+        # Convert the visually aligned Qt overlay coordinates back to the viewer
+        # coordinates expected by ActiveView.getObjectsInfo().
+        try:
+            ratio = float(self.viewport.devicePixelRatioF())
+        except Exception:
+            ratio = 1.0
+        x = int(round(pt.x() * ratio))
+        y = int(round((self.viewport.height() - pt.y()) * ratio))
+        return (x, y)
 
-            pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+    def _raw_to_qpoint_math(self, pos):
+        # True mathematical conversion from viewer/raw coordinates to Qt widget
+        # coordinates. Use this for projected object geometry, NOT for the live
+        # cursor/rubber-band display.
+        try:
+            ratio = float(self.viewport.devicePixelRatioF())
+        except Exception:
+            ratio = 1.0
 
-            # Second click → perform selection
+        x = int(round(float(pos[0]) / ratio))
+        y = int(round(self.viewport.height() - (float(pos[1]) / ratio)))
+        return QtCore.QPoint(x, y)
+
+    def _current_preselection_name(self):
+        try:
+            pre = Gui.Selection.getPreselection()
+            if pre and getattr(pre, 'ObjectName', None):
+                return pre.ObjectName
+        except Exception:
+            pass
+        return ""
+
+    def _start_box(self, raw_pos):
+        self.raw_start = (int(raw_pos[0]), int(raw_pos[1]))
+        self.raw_current = (int(raw_pos[0]), int(raw_pos[1]))
+        self.box.start_pos = self._raw_to_qpoint(self.raw_start)
+        self.box.current_pos = self._raw_to_qpoint(self.raw_current)
+        self.box.is_active = True
+        self.box.resize(self.viewport.size())
+        if not self.box.isVisible():
+            self.box.show()
+        self.box.raise_()
+        self.box.update()
+        self.state = 1
+
+    def _update_box(self, raw_pos):
+        self.raw_current = (int(raw_pos[0]), int(raw_pos[1]))
+        self.box.current_pos = self._raw_to_qpoint(self.raw_current)
+        self.box.is_active = True
+        if not self.box.isVisible():
+            self.box.show()
+        self.box.raise_()
+        self._update_preview()
+
+    def _finish_box(self, raw_pos):
+        self._update_box(raw_pos)
+        # Start suppression before the native viewport click path can react.
+        self._suppress_qt_until = time.time() + 0.60
+        self._perform_selection()
+        self.cancel_box()
+
+    def _coin_mouse(self, info):
+        try:
+            if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+                return
+            if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+                return
+            if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
+                return
+            if _has_active_draft_command():
+                return
+
+            state = str(info.get("State", ""))
+            button = str(info.get("Button", ""))
+            pos = info.get("Position", None)
+
+            if not pos or state != "DOWN":
+                return
+
+            is_left = "BUTTON1" in button or "LEFT" in button
+            is_right = "BUTTON2" in button or "RIGHT" in button
+
+            if is_right:
+                if self.state == 1:
+                    self.cancel_box()
+                return
+
+            if not is_left:
+                return
+
             if self.state == 1:
-                self.box.current_pos = pos
-                self._perform_selection()
-                self.box.is_active = False
-                self.box.hide()
-                self.state = 0
-                return True
+                self._finish_box(pos)
+                return
 
-            # First click: object under cursor → let FreeCAD handle
-            try:
-                pre = Gui.Selection.getPreselection()
-                if pre.ObjectName:
-                    return False
-            except: pass
+            if self._current_preselection_name():
+                return
 
-            # First click on empty space → set first corner
-            self.box.start_pos = pos
-            self.box.current_pos = pos
-            self.state = 1
-            return True
+            self._start_box(pos)
+        except Exception as exc:
+            App.Console.PrintWarning("ClassicCAD: selection mouse callback warning: %s\n" % exc)
 
-        # --- RIGHT PRESS (cancel box) ---
-        elif event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.RightButton:
-            if self.state == 1:
-                self.state = 0
-                self.box.is_active = False
-                self.box.hide()
+    def _coin_move(self, info):
+        try:
+            if self.state != 1:
+                return
+            pos = info.get("Position", None)
+            if not pos:
+                return
+            self._update_box(pos)
+        except Exception as exc:
+            App.Console.PrintWarning("ClassicCAD: selection move callback warning: %s\n" % exc)
 
-        # --- MOUSE MOVE ---
-        elif event.type() == QtCore.QEvent.MouseMove:
-            if self.state == 1:
-                pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
-                self.box.current_pos = pos
-
-                if not self.box.is_active:
-                    dx = abs(pos.x() - self.box.start_pos.x())
-                    dy = abs(pos.y() - self.box.start_pos.y())
-                    if dx > self.DRAG_THRESHOLD or dy > self.DRAG_THRESHOLD:
-                        self.box.is_active = True
-                        self.box.show()
-
-                self.box.update()
-                return True
-            return False
-
-        # --- LEFT RELEASE (consume but no action) ---
-        elif event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
-            if self.state == 1:
-                return True
-            return False
-
-        elif event.type() == QtCore.QEvent.Resize:
-            self.box.resize(event.size())
-
-        return False
-
-    # ------ 3D → 2D PROJECTION (Coin3D) ------
-    def _get_projection(self, view):
-        """Υπολογισμός projection παραμέτρων μία φορά ανά selection."""
+    def _get_projection(self):
         try:
             from pivy import coin
+            view = Gui.activeView()
+            if not view:
+                return None
             cam = view.getCameraNode()
             vol = cam.getViewVolume()
-            # Use widget dimensions (logical pixels) to match mouse event coords
             w = self.viewport.width()
             h = self.viewport.height()
             return (coin, vol, w, h)
         except Exception:
             return None
 
-    def _project(self, proj, pt3d):
-        """Project ενός 3D σημείου → 2D pixel."""
+    def _project_raw(self, proj, pt3d):
         coin_mod, vol, w, h = proj
         p = coin_mod.SbVec3f(float(pt3d.x), float(pt3d.y), float(pt3d.z))
         scr = coin_mod.SbVec3f()
         vol.projectToScreen(p, scr)
         v = scr.getValue()
-        return QtCore.QPoint(int(v[0] * w), int((1.0 - v[1]) * h))
+        return (int(v[0] * w), int(v[1] * h))
 
-    def _get_screen_points(self, obj, proj):
-        """Πάρε projected 2D σημεία για ένα object (vertices + curve samples)."""
-        pts = []
+    def _to_world_point(self, obj, p):
+        try:
+            if hasattr(obj, 'getGlobalPlacement'):
+                gp = obj.getGlobalPlacement()
+                if gp:
+                    return gp.multVec(p)
+        except Exception:
+            pass
+        try:
+            if hasattr(obj, 'Placement') and obj.Placement:
+                return obj.Placement.multVec(p)
+        except Exception:
+            pass
+        return p
+
+    def _project_obj_qpoints(self, obj, proj):
         try:
             shape = obj.Shape
-            if shape.isNull(): return []
+            if shape.isNull():
+                return []
 
-            # Vertices (αρκεί για ευθείες γραμμές/wires)
+            pts = []
             for v in shape.Vertexes:
                 pts.append(v.Point)
 
-            # Sample καμπύλων ακμών (κύκλοι, τόξα, splines)
             for edge in shape.Edges:
                 try:
+                    fp, lp = edge.FirstParameter, edge.LastParameter
+                    pts.append(edge.valueAt(fp))
+                    pts.append(edge.valueAt(lp))
                     ctype = type(edge.Curve).__name__
                     if ctype not in ('Line', 'LineSegment'):
-                        fp, lp = edge.FirstParameter, edge.LastParameter
-                        for i in range(1, 7):
-                            pts.append(edge.valueAt(fp + (lp - fp) * i / 7))
+                        for i in range(1, 9):
+                            pts.append(edge.valueAt(fp + (lp - fp) * i / 9.0))
                 except Exception:
                     pass
 
-            # Fallback σε BoundBox αν δεν βρέθηκαν σημεία
+            # Fallback to bbox corners if needed
             if not pts:
                 bb = shape.BoundBox
                 if bb.isValid():
@@ -198,25 +340,255 @@ class CCADSelectionLogic(QtCore.QObject):
                         for y in (bb.YMin, bb.YMax):
                             for z in (bb.ZMin, bb.ZMax):
                                 pts.append(App.Vector(x, y, z))
+
+            qpts = []
+            for p in pts:
+                try:
+                    wp = self._to_world_point(obj, p)
+                    raw = self._project_raw(proj, wp)
+                    qpts.append(self._raw_to_qpoint_math(raw))
+                except Exception:
+                    pass
+            return qpts
         except Exception:
             return []
 
-        result = []
-        for p in pts:
+    def _object_projected_qrect(self, obj, proj):
+        qpts = self._project_obj_qpoints(obj, proj)
+        if not qpts:
+            return None
+        xs = [p.x() for p in qpts]
+        ys = [p.y() for p in qpts]
+        return QtCore.QRect(
+            QtCore.QPoint(min(xs), min(ys)),
+            QtCore.QPoint(max(xs), max(ys))
+        ).normalized()
+
+    def _object_fully_inside_qrect(self, obj, qt_rect, proj):
+        # Blue window selection:
+        # the old strict containment rejected many objects that looked visibly
+        # inside the box. Keep crossing unchanged, but make blue selection accept
+        # objects whose projected screen-bounds are mostly inside the visible box.
+        obj_rect = self._object_projected_qrect(obj, proj)
+        if obj_rect is None:
+            return False
+
+        outer = qt_rect.adjusted(-6, -6, 6, 6)
+
+        if outer.contains(obj_rect):
+            return True
+
+        inter = outer.intersected(obj_rect)
+        if inter.isEmpty():
+            return False
+
+        inter_area = max(1, inter.width()) * max(1, inter.height())
+        obj_area = max(1, obj_rect.width()) * max(1, obj_rect.height())
+        coverage = float(inter_area) / float(obj_area)
+
+        # Accept when most of the object's projected box is inside.
+        if coverage >= 0.72:
+            return True
+
+        # Fallback for long thin objects: accept when center and the first/last
+        # projected sample points lie inside the blue box.
+        qpts = self._project_obj_qpoints(obj, proj)
+        if qpts:
+            test_rect = outer.adjusted(-2, -2, 2, 2)
+            cx = int(sum(p.x() for p in qpts) / len(qpts))
+            cy = int(sum(p.y() for p in qpts) / len(qpts))
+            center = QtCore.QPoint(cx, cy)
+            first = qpts[0]
+            last = qpts[-1]
+            if test_rect.contains(center) and test_rect.contains(first) and test_rect.contains(last):
+                return True
+
+        return False
+
+    def _sample_points_in_rect(self, rect):
+        # Sample in Qt/widget coordinates because the visible box is drawn there.
+        width = max(1, rect.width())
+        height = max(1, rect.height())
+
+        # Slight inflation helps with rounding / HiDPI mismatch.
+        rect = rect.adjusted(-4, -4, 4, 4)
+
+        inner_step = 12
+        edge_step = 4
+        if width < 80 or height < 80:
+            inner_step = 6
+            edge_step = 2
+
+        left, right = rect.left(), rect.right()
+        top, bottom = rect.top(), rect.bottom()
+
+        xs_inner = list(range(left, right + 1, inner_step))
+        ys_inner = list(range(top, bottom + 1, inner_step))
+        xs_edge = list(range(left, right + 1, edge_step))
+        ys_edge = list(range(top, bottom + 1, edge_step))
+
+        pts = set()
+
+        # Dense border sampling
+        for x in xs_edge:
+            pts.add((int(x), int(top)))
+            pts.add((int(x), int(bottom)))
+        for y in ys_edge:
+            pts.add((int(left), int(y)))
+            pts.add((int(right), int(y)))
+
+        # Interior grid sampling
+        for y in ys_inner:
+            for x in xs_inner:
+                pts.add((int(x), int(y)))
+
+        # Always include corners, edge midpoints, and center
+        cx, cy = rect.center().x(), rect.center().y()
+        extras = [
+            (left, top), (right, top), (left, bottom), (right, bottom),
+            (cx, top), (cx, bottom), (left, cy), (right, cy),
+            (cx, cy),
+        ]
+        for p in extras:
+            pts.add((int(p[0]), int(p[1])))
+
+        return sorted(pts)
+
+    def _pick_objects_in_rect(self, qt_rect):
+        view = Gui.activeView()
+        if not view:
+            return set()
+
+        hits = set()
+        for qt_pt in self._sample_points_in_rect(qt_rect):
             try:
-                result.append(self._project(proj, p))
+                raw_pt = self._qpoint_to_raw(QtCore.QPoint(int(qt_pt[0]), int(qt_pt[1])))
+                infos = view.getObjectsInfo(raw_pt)
+            except Exception:
+                infos = None
+            if not infos:
+                continue
+
+            if isinstance(infos, dict):
+                infos = [infos]
+
+            for info in infos:
+                try:
+                    obj_name = info.get("Object")
+                    if obj_name:
+                        hits.add(str(obj_name))
+                    parent_name = info.get("ParentObject")
+                    if parent_name:
+                        hits.add(str(parent_name))
+                except Exception:
+                    pass
+        return hits
+
+
+    def _visible_shape_objects(self, doc):
+        objs = []
+        try:
+            for obj in doc.Objects:
+                try:
+                    if not hasattr(obj, "ViewObject") or not obj.ViewObject.Visibility:
+                        continue
+                    if not hasattr(obj, "Shape") or obj.Shape.isNull():
+                        continue
+                    objs.append(obj)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return objs
+
+    def _blue_window_candidate_names(self, qt_rect, doc, proj):
+        names = []
+        preview_rects = []
+        if proj is None:
+            return names, preview_rects
+
+        outer = qt_rect.adjusted(-6, -6, 6, 6)
+        for obj in self._visible_shape_objects(doc):
+            try:
+                obj_rect = self._object_projected_qrect(obj, proj)
+                if obj_rect is None:
+                    continue
+
+                if outer.contains(obj_rect):
+                    names.append(obj.Name)
+                    preview_rects.append(obj_rect)
+                    continue
+
+                inter = outer.intersected(obj_rect)
+                if inter.isEmpty():
+                    continue
+
+                inter_area = max(1, inter.width()) * max(1, inter.height())
+                obj_area = max(1, obj_rect.width()) * max(1, obj_rect.height())
+                coverage = float(inter_area) / float(obj_area)
+
+                if coverage >= 0.88:
+                    names.append(obj.Name)
+                    preview_rects.append(obj_rect)
             except Exception:
                 pass
-        return result
+        return names, preview_rects
 
-    # ------ WINDOW / CROSSING SELECTION ------
-    def _perform_selection(self):
-        view = Gui.activeView()
+    def _update_preview(self):
         doc = App.ActiveDocument
-        if not view or not doc: return
+        if not doc or not self.box.start_pos or not self.box.current_pos:
+            self._preview_names = []
+            self.box.preview_rects = []
+            self.box.update()
+            return
 
-        rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
+        qt_rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
+        if qt_rect.width() < 2 and qt_rect.height() < 2:
+            self._preview_names = []
+            self.box.preview_rects = []
+            self.box.update()
+            return
+
         is_crossing = self.box.current_pos.x() < self.box.start_pos.x()
+        proj = self._get_projection()
+        preview_names = []
+        preview_rects = []
+
+        if is_crossing:
+            label_map = {}
+            try:
+                for obj in doc.Objects:
+                    label_map[obj.Label] = obj.Name
+            except Exception:
+                pass
+
+            object_names = self._pick_objects_in_rect(qt_rect)
+            for name in sorted(object_names):
+                real_name = name
+                if not doc.getObject(real_name):
+                    real_name = label_map.get(name, name)
+                obj = doc.getObject(real_name)
+                if not obj:
+                    continue
+                preview_names.append(real_name)
+                try:
+                    if proj is not None:
+                        r = self._object_projected_qrect(obj, proj)
+                        if r is not None:
+                            preview_rects.append(r)
+                except Exception:
+                    pass
+        else:
+            preview_names, preview_rects = self._blue_window_candidate_names(qt_rect, doc, proj)
+
+        self._preview_names = preview_names
+        self.box.preview_rects = preview_rects
+        self.box.update()
+
+    def _apply_selection_names(self, names, reopen_grips=True):
+        doc = App.ActiveDocument
+        if not doc:
+            return
 
         pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
         if pickadd:
@@ -229,47 +601,80 @@ class CCADSelectionLogic(QtCore.QObject):
         if not (QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier):
             Gui.Selection.clearSelection()
 
-        proj = self._get_projection(view)
-        if not proj:
-            if blocker:
-                blocker._opening_grips = False
-            return
-
-        for obj in doc.Objects:
+        selected = 0
+        for real_name in names:
             try:
-                if not hasattr(obj, 'ViewObject') or not obj.ViewObject.Visibility:
-                    continue
-                if not hasattr(obj, 'Shape') or obj.Shape.isNull():
-                    continue
-
-                screen_pts = self._get_screen_points(obj, proj)
-                if not screen_pts:
-                    continue
-
-                if is_crossing:
-                    # Crossing: projected bounding rect τέμνει selection rect
-                    xs = [p.x() for p in screen_pts]
-                    ys = [p.y() for p in screen_pts]
-                    obj_rect = QtCore.QRect(
-                        QtCore.QPoint(min(xs), min(ys)),
-                        QtCore.QPoint(max(xs), max(ys))
-                    )
-                    if rect.intersects(obj_rect):
-                        Gui.Selection.addSelection(doc.Name, obj.Name)
-                else:
-                    # Window: ΟΛΑ τα σημεία μέσα στο rect
-                    if all(rect.contains(p) for p in screen_pts):
-                        Gui.Selection.addSelection(doc.Name, obj.Name)
+                if doc.getObject(real_name):
+                    Gui.Selection.addSelection(doc.Name, real_name)
+                    selected += 1
             except Exception:
-                continue
+                pass
 
-        # Άνοιξε grips για όλα τα επιλεγμένα objects
+        # If Draft opened edit mode from the second click, close it back down.
+        try:
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                Gui.Control.closeDialog()
+        except Exception:
+            pass
+
+        App.Console.PrintMessage("ClassicCAD: box selection selected %d object(s).\n" % selected)
+
         if blocker:
             blocker._opening_grips = False
             sel = Gui.Selection.getSelection()
-            if sel:
+            if sel and reopen_grips:
                 blocker._opening_grips = True
                 QtCore.QTimer.singleShot(30, blocker._open_grips)
+
+    def _perform_selection(self):
+        view = Gui.activeView()
+        doc = App.ActiveDocument
+        if not view or not doc or not self.box.start_pos or not self.box.current_pos:
+            return
+
+        # Use the visible Qt/widget rectangle as the single source of truth.
+        qt_rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
+
+        if qt_rect.width() < 2 and qt_rect.height() < 2:
+            return
+
+        object_names = self._pick_objects_in_rect(qt_rect)
+        is_crossing = self.box.current_pos.x() < self.box.start_pos.x()
+
+        label_map = {}
+        try:
+            for obj in doc.Objects:
+                label_map[obj.Label] = obj.Name
+        except Exception:
+            pass
+
+        proj = self._get_projection()
+        final_names = []
+
+        for name in sorted(object_names):
+            real_name = name
+            if not doc.getObject(real_name):
+                real_name = label_map.get(name, name)
+
+            try:
+                obj = doc.getObject(real_name)
+                if not obj:
+                    continue
+
+                # Blue window selection: all projected geometry points must be inside.
+                # Crossing selection (right-to-left): any sampled hit is enough.
+                if not is_crossing and proj is not None:
+                    if not self._object_fully_inside_qrect(obj, qt_rect, proj):
+                        continue
+
+                final_names.append(real_name)
+            except Exception:
+                pass
+
+        # Apply immediately, then reinforce once more a moment later.
+        # This is more stable across slow/medium/fast second-click timing.
+        self._apply_selection_names(list(final_names), reopen_grips=False)
+        QtCore.QTimer.singleShot(80, lambda names=list(final_names): self._apply_selection_names(names, reopen_grips=True))
 
 # =========================================================
 # AUTO GRIPS & PICK RADIUS
@@ -680,11 +1085,19 @@ def _attach_viewport(mw, retries=0):
 def tear_down():
     if hasattr(Gui, "ccad_sel_logic"):
         try:
-            Gui.ccad_sel_logic.viewport.removeEventFilter(Gui.ccad_sel_logic)
+            try:
+                Gui.ccad_sel_logic.remove_callbacks()
+            except Exception:
+                pass
+            try:
+                Gui.ccad_sel_logic.viewport.removeEventFilter(Gui.ccad_sel_logic)
+            except Exception:
+                pass
             Gui.ccad_sel_logic.box.deleteLater()
             Gui.ccad_sel_logic.deleteLater()
             del Gui.ccad_sel_logic
-        except: pass
+        except:
+            pass
     
     if hasattr(Gui, "ccad_auto_blocker"):
         try:
