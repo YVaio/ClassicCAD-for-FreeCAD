@@ -250,7 +250,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
                      'MOVE_CCAD', 'COPY_CCAD', 'Draft_Rotate', 'Draft_Scale',
-                     'Draft_Mirror', 'Draft_Offset', 'Std_Delete')
+                     'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
+                     'Std_Redo')
         if freecad_cmd not in _keep_sel:
             self._auto_deselect()
 
@@ -268,6 +269,76 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if freecad_cmd in ('XLINE_CCAD', 'XLINEH_CCAD', 'XLINEV_CCAD'):
             opt = {'XLINE_CCAD': None, 'XLINEH_CCAD': 'H', 'XLINEV_CCAD': 'V'}[freecad_cmd]
             ccad_cmd_xline.run(self, opt)
+            return
+
+        # ── UNDO / REDO — exit any transient Draft edit state first ──
+        if freecad_cmd in ('Std_Undo', 'Std_Redo'):
+            self._close_grips()
+            self._cleanup_handlers()
+
+            try:
+                toolbar = getattr(Gui, 'draftToolBar', None)
+                if toolbar and hasattr(toolbar, 'finish'):
+                    try:
+                        toolbar.finish(cont=False)
+                    except TypeError:
+                        toolbar.finish(False)
+            except Exception:
+                pass
+
+            try:
+                active_cmd = getattr(App, 'activeDraftCommand', None)
+                if active_cmd:
+                    finish = getattr(active_cmd, 'finish', None)
+                    if callable(finish):
+                        try:
+                            finish(cont=False)
+                        except TypeError:
+                            finish()
+            except Exception:
+                pass
+
+            try:
+                if getattr(Gui, 'ActiveDocument', None) and hasattr(Gui.ActiveDocument, 'resetEdit'):
+                    Gui.ActiveDocument.resetEdit()
+            except Exception:
+                pass
+
+            try:
+                Gui.Control.closeDialog()
+            except Exception:
+                pass
+
+            try:
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
+
+            doc = App.ActiveDocument
+            try:
+                if doc:
+                    transacting = False
+                    check = getattr(doc, 'transacting', None)
+                    if callable(check):
+                        try:
+                            transacting = bool(check())
+                        except Exception:
+                            transacting = False
+                    if transacting and hasattr(doc, 'commitTransaction'):
+                        doc.commitTransaction()
+                        try:
+                            QtWidgets.QApplication.processEvents()
+                        except Exception:
+                            pass
+
+                if doc and hasattr(doc, 'undo') and freecad_cmd == 'Std_Undo':
+                    doc.undo()
+                elif doc and hasattr(doc, 'redo') and freecad_cmd == 'Std_Redo':
+                    doc.redo()
+                else:
+                    Gui.runCommand(freecad_cmd)
+            except Exception:
+                Gui.runCommand(freecad_cmd)
             return
 
         # ── ERASE — close Draft_Edit grips first to avoid stale markers ──

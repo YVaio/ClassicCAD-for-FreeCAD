@@ -65,6 +65,7 @@ class FilletHandler:
         self.console = console
         self.step = 0
         self._waiting_radius = False
+        self._txn_open = False
         
         self.obj1 = None
         self.sub1 = None
@@ -89,6 +90,33 @@ class FilletHandler:
             self.console.history.append(f"<span style='color:#aaa;'>FILLET: Select first object or [<span style='color:#6af;'>R</span>adius] (Current={Gui.ccad_fillet_radius}):</span>")
         elif self.step == 1:
             self.console.history.append("<span style='color:#aaa;'>FILLET: Select second object:</span>")
+
+    def _open_transaction(self, name="Fillet"):
+        doc = App.ActiveDocument
+        if doc and not self._txn_open:
+            try:
+                doc.openTransaction(name)
+                self._txn_open = True
+            except Exception:
+                self._txn_open = False
+
+    def _commit_transaction(self):
+        doc = App.ActiveDocument
+        if doc and self._txn_open:
+            try:
+                doc.commitTransaction()
+            except Exception:
+                pass
+        self._txn_open = False
+
+    def _abort_transaction(self):
+        doc = App.ActiveDocument
+        if doc and self._txn_open:
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+        self._txn_open = False
             
     def addSelection(self, doc, obj_name, sub, pnt):
         if self._waiting_radius:
@@ -172,21 +200,29 @@ class FilletHandler:
             self.console.history.append("<span style='color:#ff5555;'>FILLET Error: Lines are parallel.</span>")
             return
             
-        dist1_A = dist_point_to_segment(self.pnt1, A1, I)
-        dist1_B = dist_point_to_segment(self.pnt1, B1, I)
-        if dist1_A <= dist1_B:
-            set_endpoints(o1, A1, I)
-        else:
-            set_endpoints(o1, I, B1)
-            
-        dist2_A = dist_point_to_segment(self.pnt2, A2, I)
-        dist2_B = dist_point_to_segment(self.pnt2, B2, I)
-        if dist2_A <= dist2_B:
-            set_endpoints(o2, A2, I)
-        else:
-            set_endpoints(o2, I, B2)
-            
-        App.ActiveDocument.recompute()
+        try:
+            self._open_transaction("Fillet")
+
+            dist1_A = dist_point_to_segment(self.pnt1, A1, I)
+            dist1_B = dist_point_to_segment(self.pnt1, B1, I)
+            if dist1_A <= dist1_B:
+                set_endpoints(o1, A1, I)
+            else:
+                set_endpoints(o1, I, B1)
+                
+            dist2_A = dist_point_to_segment(self.pnt2, A2, I)
+            dist2_B = dist_point_to_segment(self.pnt2, B2, I)
+            if dist2_A <= dist2_B:
+                set_endpoints(o2, A2, I)
+            else:
+                set_endpoints(o2, I, B2)
+                
+            App.ActiveDocument.recompute()
+            self._commit_transaction()
+        except Exception as exc:
+            self._abort_transaction()
+            self.console.history.append(f"<span style='color:#ff5555;'>FILLET Error: {str(exc)}</span>")
+            return
         
         if Gui.ccad_fillet_radius > 0.0:
             # Δίνουμε 50ms στο FreeCAD να ενημερώσει το 3D View με τις ενωμένες γραμμές
@@ -218,6 +254,7 @@ class FilletHandler:
             Gui.Selection.removeObserver(self)
         except:
             pass
+        self._abort_transaction()
         Gui.Selection.clearSelection()
         Gui.ccad_fillet_handler = None
 
