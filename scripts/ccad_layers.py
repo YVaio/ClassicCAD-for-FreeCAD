@@ -3,6 +3,20 @@ import FreeCADGui as Gui
 from PySide6 import QtCore, QtGui
 import Draft
 
+
+def _is_restoring_state(obj=None, doc=None):
+    try:
+        if obj and hasattr(obj, "isRestoring") and obj.isRestoring():
+            return True
+    except Exception:
+        pass
+    try:
+        if hasattr(App, "isRestoring") and App.isRestoring():
+            return True
+    except Exception:
+        pass
+    return False
+
 def _is_layer_container(obj):
     if not obj:
         return False
@@ -465,79 +479,121 @@ class LayerStyleWatcher(QtCore.QObject):
         sync_style_to_active_layer(doc, layer)
 
 
-def ensure_layer_0(doc):
-    if not doc: return
+def ensure_layer_0(doc, force_active=False):
+    if not doc:
+        return
+
     l0 = next((o for o in doc.Objects if o.Label == "0" or o.Name == "Layer0"), None)
-    
+
     if not l0:
         try:
             l0 = Draft.make_layer(name="Layer0")
             l0.Label = "0"
             doc.recompute()
-        except Exception: return
+        except Exception:
+            return
 
-    # Επιβολή 1px πάχους στο Layer 0 & λευκό χρώμα
     if l0 and hasattr(l0, "ViewObject") and l0.ViewObject:
         l0.ViewObject.LineColor = (1.0, 1.0, 1.0)
         if hasattr(l0.ViewObject, "LineWidth"):
             l0.ViewObject.LineWidth = 1.0
 
-    # Ενεργοποίηση και ενημέρωση UI
-    p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
-    p.SetString("CurrentLayer", l0.Name)
-    
-    if hasattr(Gui, 'draftToolBar'):
-        try:
-            if hasattr(Gui.draftToolBar, 'setAutoGroup'): 
-                Gui.draftToolBar.setAutoGroup(l0.Name)
-            elif hasattr(Gui.draftToolBar, 'autogroup'): 
-                Gui.draftToolBar.autogroup = l0.Name
-        except Exception: pass
+    toolbar_layer = None
+    param_layer = None
+    try:
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        autogroup = getattr(toolbar, 'autogroup', None) if toolbar else None
+        if autogroup:
+            toolbar_layer = doc.getObject(autogroup)
+    except Exception:
+        toolbar_layer = None
 
-    sync_style_to_active_layer(doc, l0)
+    try:
+        p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        param_name = p.GetString("CurrentLayer", "")
+        if param_name:
+            param_layer = doc.getObject(param_name)
+    except Exception:
+        param_layer = None
+
+    current_layer = toolbar_layer if _is_layer_container(toolbar_layer) else None
+    if not current_layer and _is_layer_container(param_layer):
+        current_layer = param_layer
+
+    if force_active or not current_layer:
+        current_layer = l0
+        try:
+            p = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+            p.SetString("CurrentLayer", l0.Name)
+        except Exception:
+            pass
+
+        if hasattr(Gui, 'draftToolBar'):
+            try:
+                if hasattr(Gui.draftToolBar, 'setAutoGroup'):
+                    Gui.draftToolBar.setAutoGroup(l0.Name)
+                elif hasattr(Gui.draftToolBar, 'autogroup'):
+                    Gui.draftToolBar.autogroup = l0.Name
+            except Exception:
+                pass
+
+    sync_style_to_active_layer(doc, current_layer or l0)
 
 class DocumentObserver:
     def slotCreatedDocument(self, doc):
-        QtCore.QTimer.singleShot(500, lambda: ensure_layer_0(doc))
+        QtCore.QTimer.singleShot(500, lambda d=doc: ensure_layer_0(d, force_active=True))
 
     def slotActivateDocument(self, doc_ptr):
-        # Στο 1.1 το slot δίνει το ίδιο το object, όχι το όνομα
         try:
             doc = doc_ptr if not isinstance(doc_ptr, str) else App.getDocument(doc_ptr)
-            if doc: ensure_layer_0(doc)
-        except Exception: pass
+            if doc:
+                delay = 750 if _is_restoring_state(doc=doc) else 0
+                QtCore.QTimer.singleShot(delay, lambda d=doc: ensure_layer_0(d, force_active=True))
+        except Exception:
+            pass
 
     def slotCreatedObject(self, obj):
-        if not obj or not hasattr(obj, "Name"): return
-
-        # Επιβολή 1px σε οποιοδήποτε νέο Layer δημιουργείται
-        if obj.TypeId == "App::DocumentObjectGroup" or "Layer" in obj.TypeId or obj.Name.startswith("Layer"):
-            def set_lw(name):
-                o = App.ActiveDocument.getObject(name)
-                if o and hasattr(o, "ViewObject") and o.ViewObject:
-                    if hasattr(o.ViewObject, "LineWidth"):
-                        o.ViewObject.LineWidth = 1.0
-            QtCore.QTimer.singleShot(200, lambda n=obj.Name: set_lw(n))
+        if not obj or not hasattr(obj, "Name"):
             return
 
-        if obj.Label == "0" or obj.Name.startswith("Layer") or "Group" in obj.TypeId: return
-        if obj.TypeId in ('App::Origin', 'App::Line', 'App::Plane'): return
+        doc = getattr(obj, "Document", None)
+        if not doc or _is_restoring_state(obj, doc):
+            return
+
+        if obj.TypeId == "App::DocumentObjectGroup" or "Layer" in obj.TypeId or obj.Name.startswith("Layer"):
+            def set_lw(doc_name, name):
+                d = App.getDocument(doc_name) if doc_name else None
+                o = d.getObject(name) if d else None
+                if o and hasattr(o, "ViewObject") and o.ViewObject and hasattr(o.ViewObject, "LineWidth"):
+                    o.ViewObject.LineWidth = 1.0
+
+            QtCore.QTimer.singleShot(200, lambda dn=doc.Name, n=obj.Name: set_lw(dn, n))
+            return
+
+        if obj.Label == "0" or obj.Name.startswith("Layer") or "Group" in obj.TypeId:
+            return
+        if obj.TypeId in ('App::Origin', 'App::Line', 'App::Plane'):
+            return
 
         obj_name = obj.Name
-        # Re-apply after a few delays so generated child wires inherit the correct layer.
+        doc_name = doc.Name
         for delay in (150, 500, 1000):
-            QtCore.QTimer.singleShot(delay, lambda n=obj_name: self.move_to_active_layer(n))
+            QtCore.QTimer.singleShot(delay, lambda dn=doc_name, n=obj_name: self.move_to_active_layer(dn, n))
 
-    def move_to_active_layer(self, obj_name):
-        doc = App.ActiveDocument
-        if not doc: return
+    def move_to_active_layer(self, doc_name, obj_name):
+        doc = App.getDocument(doc_name) if doc_name else App.ActiveDocument
+        if not doc or _is_restoring_state(doc=doc):
+            return
+
         obj = doc.getObject(obj_name)
-        if not obj: return
+        if not obj or _is_restoring_state(obj, doc):
+            return
 
-        target_layer = get_object_layer(obj) or get_active_layer(doc)
-        if not target_layer or not hasattr(target_layer, "Group"): return
+        active_layer = get_active_layer(doc)
+        target_layer = get_object_layer(obj) or active_layer
+        if not target_layer or not hasattr(target_layer, "Group"):
+            return
 
-        # Keep the object's existing layer if it already has one; otherwise use the active layer.
         objects_to_move = [obj]
         if hasattr(obj, "OutList"):
             for child in obj.OutList:
@@ -545,8 +601,11 @@ class DocumentObserver:
                     objects_to_move.append(child)
 
         for item in objects_to_move:
-            item_layer = get_object_layer(item) or target_layer
-            assign_to_layer(item, item_layer)
+            item_layer = get_object_layer(item)
+            if item_layer and hasattr(item_layer, "Group"):
+                _layer_add_object(item_layer, item)
+            elif active_layer and hasattr(active_layer, "Group"):
+                assign_to_layer(item, active_layer)
 
 def setup():
     if hasattr(Gui, "ccad_layer_observer"):
@@ -568,9 +627,9 @@ def setup():
     Gui.ccad_layer_style_watcher = LayerStyleWatcher(Gui.getMainWindow())
     _patch_runtime_hooks()
 
-    # Εκκίνηση: Εξασφάλιση Layer 0 με καθυστέρηση για να είναι έτοιμο το UI
+    # Εκκίνηση: Εξασφάλιση και ενεργοποίηση του Layer 0 με καθυστέρηση για να είναι έτοιμο το UI
     if App.ActiveDocument:
-        QtCore.QTimer.singleShot(1000, lambda: ensure_layer_0(App.ActiveDocument))
+        QtCore.QTimer.singleShot(1000, lambda: ensure_layer_0(App.ActiveDocument, force_active=True))
 
 setup()
 

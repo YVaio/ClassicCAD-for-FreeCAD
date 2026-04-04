@@ -963,8 +963,17 @@ class SelectionObserver(QtCore.QObject):
     def __init__(self):
         super().__init__()
         self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(SelectionManager.force_pick_radius)
+        self.timer.timeout.connect(self.refresh)
         self.timer.start(1000)
+
+    def refresh(self):
+        SelectionManager.force_pick_radius()
+        try:
+            mw = Gui.getMainWindow()
+            if mw:
+                _attach_viewport(mw)
+        except Exception:
+            pass
 
 # =========================================================
 class AdditiveSelectionFilter(QtCore.QObject):
@@ -1191,10 +1200,33 @@ def setup():
     app.installEventFilter(Gui.ccad_pickadd_filter)
 
 def _attach_viewport(mw, retries=0):
-    """Βρες το viewport. Αν δεν είναι ακόμα έτοιμο, ξαναδοκίμασε."""
+    """Βρες το τρέχον viewport και επανασύνδεσε τη λογική αν άλλαξε document/view."""
     target = next((w for w in mw.findChildren(QtWidgets.QWidget)
                    if "View3DInventor" in w.metaObject().className() and w.isVisible()), None)
     if target:
+        current = getattr(Gui, "ccad_sel_logic", None)
+        try:
+            if current and getattr(current, "viewport", None) is target:
+                return
+        except Exception:
+            pass
+
+        if current:
+            try:
+                current.remove_callbacks()
+            except Exception:
+                pass
+            try:
+                current.viewport.removeEventFilter(current)
+            except Exception:
+                pass
+            try:
+                current.deleteLater()
+            except Exception:
+                pass
+            if hasattr(Gui, "ccad_sel_logic"):
+                del Gui.ccad_sel_logic
+
         Gui.ccad_sel_logic = CCADSelectionLogic(target)
         App.Console.PrintLog("ClassicCAD Selection: Viewport attached.\n")
     elif retries < 10:

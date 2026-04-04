@@ -222,6 +222,30 @@ class ClassicCADWorkbench(Workbench):
         try:
             manager = self.__class__._import_manager()
             manager.activate(expected_ui_workbench=self.__class__.__name__)
+
+            try:
+                import ccad_layers
+
+                doc = App.ActiveDocument
+                if doc:
+                    ccad_layers.ensure_layer_0(doc, force_active=True)
+                    try:
+                        from PySide6 import QtCore as _QtCore
+                    except Exception:
+                        try:
+                            from PySide2 import QtCore as _QtCore
+                        except Exception:
+                            _QtCore = None
+                    if _QtCore is not None:
+                        _QtCore.QTimer.singleShot(
+                            250,
+                            lambda d=doc: ccad_layers.ensure_layer_0(d, force_active=True),
+                        )
+            except Exception as layer_exc:
+                App.Console.PrintWarning(
+                    "ClassicCAD: Layer 0 activation warning: %s\n" % layer_exc
+                )
+
             App.Console.PrintMessage(
                 "ClassicCAD: standalone behavior layer activated.\n"
             )
