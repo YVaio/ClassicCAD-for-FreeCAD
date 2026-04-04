@@ -44,7 +44,7 @@ _STATE = {
     "active": False,
     "loaded_modules": [],
     "watch_timer": None,
-    "expected_ui_workbench": "DraftWorkbench",
+    "expected_ui_workbench": "ClassicCADWorkbench",
 }
 
 
@@ -252,7 +252,7 @@ def _check_workbench_exit():
     if not _STATE["active"]:
         return
     current = _current_workbench_name()
-    expected = _STATE.get("expected_ui_workbench", "DraftWorkbench")
+    expected = _STATE.get("expected_ui_workbench", "ClassicCADWorkbench")
     if current and current != expected:
         App.Console.PrintMessage(
             "ClassicCAD: detected workbench change to %s, unloading behavior layer.\n" % current
@@ -293,9 +293,12 @@ def _import_and_setup(mod_name):
     return module
 
 
-def activate():
+def activate(expected_ui_workbench=None):
     ensure_paths()
+    if expected_ui_workbench:
+        _STATE["expected_ui_workbench"] = expected_ui_workbench
     if _STATE["active"]:
+        _start_watch_timer()
         return
 
     loaded = []

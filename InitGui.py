@@ -7,14 +7,14 @@ import FreeCADGui as Gui
 
 class ClassicCADWorkbench(Workbench):
     """
-    Clean extension mode:
-    - Reuse Draft's native UI by switching to Draft when this workbench is selected.
-    - Load ClassicCAD behavior only while the Draft UI remains active after that switch.
-    - Unload ClassicCAD behavior automatically when the user leaves Draft for another workbench.
+    Standalone Draft-style workbench.
+
+    It clones Draft's menus and toolbars into ClassicCAD, then loads the
+    ClassicCAD behavior layer only while this workbench is active.
     """
 
     MenuText = "ClassicCAD"
-    ToolTip = "Draft UI with ClassicCAD behavior loaded only while this mode is active"
+    ToolTip = "Standalone Draft-style workbench with ClassicCAD behavior"
     Icon = """
         /* XPM */
         static char * xpm_x[] = {
@@ -63,23 +63,167 @@ class ClassicCADWorkbench(Workbench):
         import classiccad_workbench_manager as manager
         return manager
 
+    def _init_draft_clone_ui(self):
+        try:
+            import Draft_rc
+            import DraftTools
+            import DraftGui
+
+            Gui.addLanguagePath(":/translations")
+            Gui.addIconPath(":/icons")
+        except Exception as exc:
+            App.Console.PrintError(str(exc) + "\n")
+            App.Console.PrintError(
+                "ClassicCAD: Draft modules failed to initialize; the workbench will not work as expected.\n"
+            )
+            raise
+
+        import draftutils.init_tools as init_tools
+
+        self.drawing_commands = init_tools.get_draft_drawing_commands()
+        self.annotation_commands = init_tools.get_draft_annotation_commands()
+        self.modification_commands = init_tools.get_draft_modification_commands()
+        self.utility_commands_menu = init_tools.get_draft_utility_commands_menu()
+        self.utility_commands_toolbar = init_tools.get_draft_utility_commands_toolbar()
+        self.context_commands = init_tools.get_draft_context_commands()
+
+        init_tools.init_toolbar(
+            self,
+            "Draft Creation",
+            self.drawing_commands,
+        )
+        init_tools.init_toolbar(
+            self,
+            "Draft Annotation",
+            self.annotation_commands,
+        )
+        init_tools.init_toolbar(
+            self,
+            "Draft Modification",
+            self.modification_commands,
+        )
+        init_tools.init_toolbar(
+            self,
+            "Draft Utility",
+            self.utility_commands_toolbar,
+        )
+        init_tools.init_toolbar(
+            self,
+            "Draft Snap",
+            init_tools.get_draft_snap_commands(),
+        )
+
+        init_tools.init_menu(
+            self,
+            ["&Drafting"],
+            self.drawing_commands,
+        )
+        init_tools.init_menu(
+            self,
+            ["&Annotation"],
+            self.annotation_commands,
+        )
+        init_tools.init_menu(
+            self,
+            ["&Modification"],
+            self.modification_commands,
+        )
+        init_tools.init_menu(
+            self,
+            ["&Utilities"],
+            self.utility_commands_menu,
+        )
+
+        if hasattr(Gui, "draftToolBar") and not hasattr(Gui.draftToolBar, "loadedPreferences"):
+            from draftutils import params
+
+            params._param_observer_start()
+            Gui.addPreferencePage(
+                ":/ui/preferences-draft.ui", "Draft"
+            )
+            Gui.addPreferencePage(
+                ":/ui/preferences-draftinterface.ui", "Draft"
+            )
+            Gui.addPreferencePage(
+                ":/ui/preferences-draftsnap.ui", "Draft"
+            )
+            Gui.addPreferencePage(
+                ":/ui/preferences-draftvisual.ui", "Draft"
+            )
+            Gui.addPreferencePage(
+                ":/ui/preferences-drafttexts.ui", "Draft"
+            )
+            Gui.draftToolBar.loadedPreferences = True
+
+        try:
+            mw = Gui.getMainWindow()
+            if mw and not getattr(self, "_main_window_close_hooked", False):
+                mw.mainWindowClosed.connect(self.Deactivated)
+                self._main_window_close_hooked = True
+        except Exception:
+            pass
+
+        App.Console.PrintLog("Loading ClassicCAD workbench, done.\n")
+
+    @staticmethod
+    def _activate_draft_base():
+        import WorkingPlane
+        from draftutils import grid_observer
+
+        if hasattr(Gui, "draftToolBar"):
+            Gui.draftToolBar.Activated()
+        if hasattr(Gui, "Snapper"):
+            Gui.Snapper.show()
+            from draftutils import init_draft_statusbar
+
+            init_draft_statusbar.show_draft_statusbar()
+        if hasattr(WorkingPlane, "_view_observer_start"):
+            WorkingPlane._view_observer_start()
+        else:
+            App.Console.PrintWarning(
+                "Improper loading of WorkingPlane code. ClassicCAD will not work correctly.\n"
+            )
+        if hasattr(grid_observer, "_view_observer_setup"):
+            grid_observer._view_observer_setup()
+        else:
+            App.Console.PrintWarning(
+                "Improper loading of grid_observer code. ClassicCAD will not work correctly.\n"
+            )
+
+    @staticmethod
+    def _deactivate_draft_base():
+        import WorkingPlane
+        from draftutils import grid_observer
+
+        if hasattr(Gui, "draftToolBar"):
+            Gui.draftToolBar.Deactivated()
+        if hasattr(Gui, "Snapper"):
+            Gui.Snapper.hide()
+            from draftutils import init_draft_statusbar
+
+            init_draft_statusbar.hide_draft_statusbar()
+        if hasattr(WorkingPlane, "_view_observer_stop"):
+            WorkingPlane._view_observer_stop()
+        if hasattr(grid_observer, "_view_observer_setup"):
+            grid_observer._view_observer_setup()
+
     def Initialize(self):
         self.__class__._ensure_paths()
+        self._init_draft_clone_ui()
 
     def Activated(self):
-        # Switch to the real Draft workbench for the visible UI.
         try:
-            Gui.activateWorkbench("DraftWorkbench")
+            self._activate_draft_base()
         except Exception as exc:
             App.Console.PrintWarning(
-                "ClassicCAD: could not activate Draft UI base: %s\n" % exc
+                "ClassicCAD: could not activate Draft base UI: %s\n" % exc
             )
 
         try:
             manager = self.__class__._import_manager()
-            manager.activate()
+            manager.activate(expected_ui_workbench=self.__class__.__name__)
             App.Console.PrintMessage(
-                "ClassicCAD: behavior layer activated on top of Draft.\n"
+                "ClassicCAD: standalone behavior layer activated.\n"
             )
         except Exception as exc:
             App.Console.PrintError(
@@ -88,10 +232,41 @@ class ClassicCADWorkbench(Workbench):
             raise
 
     def Deactivated(self):
-        # In this architecture, switching to Draft immediately may prevent this
-        # method from being the primary unload path. The manager itself watches
-        # the active workbench and unloads when the user leaves Draft.
-        pass
+        try:
+            manager = self.__class__._import_manager()
+            manager.deactivate()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                "ClassicCAD: deactivation warning: %s\n" % exc
+            )
+
+        try:
+            self._deactivate_draft_base()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                "ClassicCAD: Draft base cleanup warning: %s\n" % exc
+            )
+
+    def ContextMenu(self, recipient):
+        has_text = False
+        for obj in Gui.Selection.getCompleteSelection():
+            if hasattr(obj.Object, "Text"):
+                has_text = True
+                break
+
+        if has_text:
+            from draftguitools import gui_hyperlink
+
+            hyperlinks_search = gui_hyperlink.Draft_Hyperlink()
+            if hyperlinks_search.has_hyperlinks() and sys.platform in [
+                "win32",
+                "cygwin",
+                "darwin",
+                "linux",
+            ]:
+                self.appendContextMenu("", ["Draft_Hyperlink"])
+
+        self.appendContextMenu("Utilities", getattr(self, "context_commands", []))
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"

@@ -7,8 +7,8 @@ So, if any of you have the expertise, will and time, please do contribute!
 **INSTRUCTIONS:**
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside: C:\Users\username\AppData\Roaming\FreeCAD\v1-1\Mod\ClassicCAD
 
-**NOTE:** ClassicCAD works as a Draft clone initially, so they are interconnected.
-When the ClassicCAD workbench is loaded the first time each session, it migrates everything to Draft as well. The rest of the workbenches stay intact (as far as I know).
+**NOTE:** ClassicCAD now runs as its own standalone Draft-style workbench.
+It clones the Draft tools/UI it needs for ClassicCAD, but it no longer migrates or hijacks the actual Draft workbench.
 
 works with **stable version 1.1**
 
