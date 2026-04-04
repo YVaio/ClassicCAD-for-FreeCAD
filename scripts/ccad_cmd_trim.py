@@ -1,5 +1,6 @@
 """Custom TRIM and EXTEND commands."""
 
+import math
 import time
 
 import FreeCAD as App
@@ -104,12 +105,26 @@ def _get_target_info(obj, subname):
             'b_world': _to_world(obj, b),
         }
 
+    if hasattr(obj, 'Radius') and hasattr(obj, 'Placement'):
+        try:
+            radius = float(getattr(obj.Radius, 'Value', obj.Radius))
+        except Exception:
+            radius = None
+        if radius and radius > 1e-9:
+            return {
+                'kind': 'circle',
+                'center': obj.Placement.Base,
+                'radius': radius,
+                'first_angle': float(getattr(obj, 'FirstAngle', 0.0)),
+                'last_angle': float(getattr(obj, 'LastAngle', 360.0)),
+            }
+
     return None
 
 
 def _get_boundary_segment(obj, subname):
     info = _get_target_info(obj, subname)
-    if info:
+    if info and 'a_world' in info and 'b_world' in info:
         return info['a_world'], info['b_world']
 
     try:
@@ -179,8 +194,275 @@ def _boundary_key(obj_name, subname):
     return (str(obj_name), _edge_index(subname))
 
 
+def _dedupe_points(points, tol=1e-6):
+    unique = []
+    for point in points:
+        if all(point.distanceToPoint(existing) > tol for existing in unique):
+            unique.append(point)
+    return unique
+
+
+def _set_segment_on_object(obj, info, start_world, end_world):
+    start_local = _to_local(obj, start_world)
+    end_local = _to_local(obj, end_world)
+
+    if info['kind'] == 'points':
+        pts = list(obj.Points)
+        idx = info['edge_index']
+        if len(pts) <= 2:
+            obj.Points = [start_local, end_local]
+        else:
+            pts[idx] = start_local
+            pts[idx + 1] = end_local
+            obj.Points = pts
+        return
+
+    if info['kind'] == 'start_end':
+        obj.Start = start_local
+        obj.End = end_local
+        return
+
+    if info['kind'] == 'xyz_line':
+        obj.X1, obj.Y1, obj.Z1 = start_local.x, start_local.y, start_local.z
+        obj.X2, obj.Y2, obj.Z2 = end_local.x, end_local.y, end_local.z
+
+
+def _copy_style_and_layer(src_obj, new_obj):
+    try:
+        import ccad_layers
+        layer = ccad_layers.get_object_layer(src_obj) or ccad_layers.get_active_layer(src_obj.Document)
+        ccad_layers.assign_to_layer(new_obj, layer)
+    except Exception:
+        pass
+
+    try:
+        src_view = getattr(src_obj, 'ViewObject', None)
+        dst_view = getattr(new_obj, 'ViewObject', None)
+        if src_view and dst_view:
+            for attr in ('LineColor', 'LineWidth', 'DrawStyle', 'PointColor', 'PointSize'):
+                if hasattr(src_view, attr) and hasattr(dst_view, attr):
+                    setattr(dst_view, attr, getattr(src_view, attr))
+    except Exception:
+        pass
+
+
+def _make_line_copy(src_obj, start_world, end_world):
+    if start_world.distanceToPoint(end_world) < 1e-6:
+        return None
+
+    import Draft
+
+    try:
+        new_obj = Draft.make_line(start_world, end_world)
+    except Exception:
+        new_obj = Draft.make_wire([start_world, end_world], closed=False, face=False)
+
+    _copy_style_and_layer(src_obj, new_obj)
+    return new_obj
+
+
+def _make_wire_copy(src_obj, world_points):
+    if len(world_points) < 2:
+        return None
+
+    import Draft
+
+    new_obj = Draft.make_wire(world_points, closed=False, face=False)
+    _copy_style_and_layer(src_obj, new_obj)
+    return new_obj
+
+
+def _find_line_intersections(doc, target_name, target_sub, target_info, boundaries):
+    if not doc:
+        return []
+
+    a_world = target_info['a_world']
+    b_world = target_info['b_world']
+    target_key = _boundary_key(target_name, target_sub)
+    hits = []
+    eps = 1e-6
+
+    for boundary in boundaries:
+        obj_name = boundary['obj_name']
+        subname = boundary['sub']
+        if _boundary_key(obj_name, subname) == target_key:
+            continue
+
+        obj = doc.getObject(obj_name)
+        if not obj:
+            continue
+
+        boundary_seg = _get_boundary_segment(obj, subname)
+        if not boundary_seg:
+            continue
+
+        intersection = intersect_2d(a_world, b_world, boundary_seg[0], boundary_seg[1])
+        if not intersection:
+            continue
+
+        u = _line_parameter(boundary_seg[0], boundary_seg[1], intersection)
+        if not (-eps <= u <= 1.0 + eps):
+            continue
+
+        t = _line_parameter(a_world, b_world, intersection)
+        hits.append((t, intersection))
+
+    unique = []
+    for t, point in sorted(hits, key=lambda item: item[0]):
+        if all(point.distanceToPoint(existing[1]) > 1e-6 for existing in unique):
+            unique.append((t, point))
+    return unique
+
+
+def _segment_circle_intersections(center, radius, a, b):
+    dx = b.x - a.x
+    dy = b.y - a.y
+    fx = a.x - center.x
+    fy = a.y - center.y
+
+    qa = dx * dx + dy * dy
+    if qa < 1e-12:
+        return []
+
+    qb = 2.0 * (fx * dx + fy * dy)
+    qc = fx * fx + fy * fy - radius * radius
+    disc = qb * qb - 4.0 * qa * qc
+    if disc < -1e-9:
+        return []
+
+    disc = max(0.0, disc)
+    root = math.sqrt(disc)
+    hits = []
+    for sign in (-1.0, 1.0):
+        t = (-qb + sign * root) / (2.0 * qa)
+        if -1e-6 <= t <= 1.0 + 1e-6:
+            hits.append(App.Vector(a.x + t * dx, a.y + t * dy, center.z))
+    return _dedupe_points(hits)
+
+
+def _normalize_angle(angle):
+    return angle % 360.0
+
+
+def _point_angle(center, point):
+    return _normalize_angle(math.degrees(math.atan2(point.y - center.y, point.x - center.x)))
+
+
+def _angle_between(angle, start, end):
+    angle = _normalize_angle(angle)
+    start = _normalize_angle(start)
+    end = _normalize_angle(end)
+    span = (end - start) % 360.0
+    return ((angle - start) % 360.0) <= span + 1e-6
+
+
+def _trim_circle_target(doc, target_name, target_sub, obj, target_info, pick_world, boundaries):
+    center = target_info['center']
+    radius = target_info['radius']
+    points = []
+
+    for boundary in boundaries:
+        obj_name = boundary['obj_name']
+        subname = boundary['sub']
+        if _boundary_key(obj_name, subname) == _boundary_key(target_name, target_sub):
+            continue
+
+        boundary_obj = doc.getObject(obj_name)
+        if not boundary_obj:
+            continue
+        boundary_seg = _get_boundary_segment(boundary_obj, subname)
+        if not boundary_seg:
+            continue
+        points.extend(_segment_circle_intersections(center, radius, boundary_seg[0], boundary_seg[1]))
+
+    points = _dedupe_points(points)
+    if len(points) < 2:
+        return False, 'Need two intersections to trim that circle/arc.'
+
+    angles = sorted(_normalize_angle(_point_angle(center, point)) for point in points)
+    pick_angle = _point_angle(center, pick_world)
+
+    remove_start = None
+    remove_end = None
+    for idx, start in enumerate(angles):
+        end = angles[(idx + 1) % len(angles)]
+        if _angle_between(pick_angle, start, end):
+            remove_start = start
+            remove_end = end
+            break
+
+    if remove_start is None:
+        return False, 'Could not determine the picked arc segment.'
+
+    keep_start = remove_end
+    keep_end = remove_start
+    if not hasattr(obj, 'FirstAngle') or not hasattr(obj, 'LastAngle'):
+        return False, 'Circle trimming is not supported for this object type.'
+
+    obj.FirstAngle = keep_start
+    obj.LastAngle = keep_end
+    return True, None
+
+
+def _trim_line_target(doc, target_name, target_sub, obj, target_info, pick_world, boundaries):
+    intersections = _find_line_intersections(doc, target_name, target_sub, target_info, boundaries)
+    if not intersections:
+        return False, 'No valid cutting edge found for that side.'
+
+    a_world = target_info['a_world']
+    b_world = target_info['b_world']
+    pick_t = _line_parameter(a_world, b_world, pick_world)
+    inner = [(t, point) for t, point in intersections if -1e-6 <= t <= 1.0 + 1e-6]
+    inner.sort(key=lambda item: item[0])
+
+    if not inner:
+        return False, 'No cutting edge intersects the selected object.'
+
+    params = [0.0] + [t for t, _ in inner] + [1.0]
+    points = [a_world] + [point for _, point in inner] + [b_world]
+    pick_t = max(0.0, min(1.0, pick_t))
+
+    seg_index = len(params) - 2
+    for idx in range(len(params) - 1):
+        if params[idx] - 1e-6 <= pick_t <= params[idx + 1] + 1e-6:
+            seg_index = idx
+            break
+
+    left_point = points[seg_index]
+    right_point = points[seg_index + 1]
+
+    # Clicked segment touches an end: simple trim of that end.
+    if seg_index == 0:
+        _apply_target_point(obj, target_info, right_point, pick_world)
+        return True, None
+    if seg_index == len(points) - 2:
+        _apply_target_point(obj, target_info, left_point, pick_world)
+        return True, None
+
+    # Clicked segment is between two cutting edges: remove only that part.
+    if target_info['kind'] == 'points' and len(getattr(obj, 'Points', []) or []) > 2:
+        pts = list(obj.Points)
+        idx = target_info['edge_index']
+        left_local = _to_local(obj, left_point)
+        right_local = _to_local(obj, right_point)
+
+        left_chain = pts[:idx + 1] + [left_local]
+        right_chain = [right_local] + pts[idx + 1:]
+
+        if len(left_chain) >= 2:
+            obj.Points = left_chain
+        if len(right_chain) >= 2:
+            world_points = [_to_world(obj, point) for point in right_chain]
+            _make_wire_copy(obj, world_points)
+        return True, None
+
+    _set_segment_on_object(obj, target_info, a_world, left_point)
+    _make_line_copy(obj, right_point, b_world)
+    return True, None
+
+
 def _find_best_intersection(doc, target_name, target_sub, target_info, pick_world, boundaries, mode):
-    if not doc or not boundaries:
+    if not doc or not boundaries or target_info.get('kind') == 'circle':
         return None
 
     a_world = target_info['a_world']
@@ -207,6 +489,10 @@ def _find_best_intersection(doc, target_name, target_sub, target_info, pick_worl
 
         intersection = intersect_2d(a_world, b_world, boundary_seg[0], boundary_seg[1])
         if not intersection:
+            continue
+
+        u = _line_parameter(boundary_seg[0], boundary_seg[1], intersection)
+        if not (-eps <= u <= 1.0 + eps):
             continue
 
         t = _line_parameter(a_world, b_world, intersection)
@@ -242,7 +528,8 @@ class TrimExtendHandler:
         self.mode = (mode or 'TRIM').upper()
         self.step = 0
         self.boundaries = []
-        self.last_sel_time = time.time()
+        self.last_sel_time = 0.0
+        self._last_sel_key = None
         self._txn_open = False
 
         preselected = []
@@ -255,19 +542,13 @@ class TrimExtendHandler:
         Gui.Selection.addObserver(self)
         Gui.ccad_trim_handler = self
 
-        if preselected:
-            for sel in preselected:
-                obj_name = getattr(sel, 'ObjectName', None)
-                if not obj_name:
-                    continue
-                subnames = list(getattr(sel, 'SubElementNames', []) or ['Edge1'])
-                for subname in subnames:
-                    if 'Edge' in str(subname):
-                        self._add_boundary(obj_name, str(subname), silent=True)
-            if self.boundaries:
-                self.console.history.append(
-                    f"<span style='color:#aaa;'>{self.mode}: {len(self.boundaries)} cutting edge(s) preselected. Press Enter to continue or select more.</span>"
-                )
+        self._collect_selected_boundaries(preselected)
+
+        if self.boundaries:
+            self.step = 1
+            self.console.history.append(
+                f"<span style='color:#aaa;'>{self.mode}: Using {len(self.boundaries)} preselected cutting edge(s).</span>"
+            )
 
         self._prompt()
 
@@ -297,6 +578,24 @@ class TrimExtendHandler:
             )
         return True
 
+    def _collect_selected_boundaries(self, selection=None):
+        added = 0
+        try:
+            current = list(selection) if selection is not None else list(Gui.Selection.getSelectionEx())
+        except Exception:
+            current = []
+
+        for sel in current:
+            obj_name = getattr(sel, 'ObjectName', None)
+            if not obj_name:
+                continue
+            subnames = list(getattr(sel, 'SubElementNames', []) or ['Edge1'])
+            for subname in subnames:
+                name = str(subname) if 'Edge' in str(subname) else 'Edge1'
+                if self._add_boundary(obj_name, name, silent=True):
+                    added += 1
+        return added
+
     def _on_input(self):
         text = self.console.input.text().strip().upper()
         self.console.input.clear()
@@ -310,6 +609,7 @@ class TrimExtendHandler:
 
         if self.step == 0:
             if text == '':
+                self._collect_selected_boundaries()
                 if not self.boundaries:
                     self.console.history.append(
                         f"<span style='color:#ff5555;'>{self.mode}: Select at least one cutting edge first.</span>"
@@ -361,12 +661,14 @@ class TrimExtendHandler:
         self._txn_open = False
 
     def addSelection(self, doc, obj_name, sub, pnt):
+        subname = sub if sub and 'Edge' in sub else 'Edge1'
         now = time.time()
-        if now - self.last_sel_time < 0.20:
+        sel_key = (str(obj_name), str(subname), int(self.step))
+        if self._last_sel_key == sel_key and (now - self.last_sel_time) < 0.15:
             return
         self.last_sel_time = now
+        self._last_sel_key = sel_key
 
-        subname = sub if sub and 'Edge' in sub else 'Edge1'
         pick = parse_vector(pnt)
 
         if self.step == 0:
@@ -405,28 +707,41 @@ class TrimExtendHandler:
         target_info = _get_target_info(target, target_sub)
         if not target_info:
             self.console.history.append(
-                f"<span style='color:#ff5555;'>{self.mode}: Only lines and wires are supported.</span>"
-            )
-            return
-
-        intersection = _find_best_intersection(
-            doc,
-            target_name,
-            target_sub,
-            target_info,
-            target_pick,
-            self.boundaries,
-            self.mode,
-        )
-        if not intersection:
-            self.console.history.append(
-                f"<span style='color:#ff5555;'>{self.mode}: No valid cutting edge found for that side.</span>"
+                f"<span style='color:#ff5555;'>{self.mode}: Only lines, wires, and circles are supported.</span>"
             )
             return
 
         try:
             self._open_transaction('Trim/extend')
-            _apply_target_point(target, target_info, intersection, target_pick)
+
+            if self.mode == 'TRIM':
+                if target_info.get('kind') == 'circle':
+                    ok, error = _trim_circle_target(doc, target_name, target_sub, target, target_info, target_pick, self.boundaries)
+                else:
+                    ok, error = _trim_line_target(doc, target_name, target_sub, target, target_info, target_pick, self.boundaries)
+            else:
+                intersection = _find_best_intersection(
+                    doc,
+                    target_name,
+                    target_sub,
+                    target_info,
+                    target_pick,
+                    self.boundaries,
+                    self.mode,
+                )
+                if intersection:
+                    _apply_target_point(target, target_info, intersection, target_pick)
+                    ok, error = True, None
+                else:
+                    ok, error = False, 'No valid cutting edge found for that side.'
+
+            if not ok:
+                self._abort_transaction()
+                self.console.history.append(
+                    f"<span style='color:#ff5555;'>{self.mode}: {error}</span>"
+                )
+                return
+
             doc.recompute()
             self._commit_transaction()
             self.console.history.append(

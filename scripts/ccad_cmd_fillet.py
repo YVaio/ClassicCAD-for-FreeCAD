@@ -75,7 +75,8 @@ class FilletHandler:
         self.sub2 = None
         self.pnt2 = None
         
-        self.last_sel_time = time.time()
+        self.last_sel_time = 0.0
+        self._last_sel_key = None
         
         if not hasattr(Gui, 'ccad_fillet_radius'):
             Gui.ccad_fillet_radius = 0.0
@@ -123,28 +124,31 @@ class FilletHandler:
             Gui.Selection.clearSelection()
             return
 
+        subname = sub if sub and "Edge" in sub else "Edge1"
         now = time.time()
-        if now - self.last_sel_time < 0.2:
+        sel_key = (str(obj_name), str(subname), int(self.step))
+        if self._last_sel_key == sel_key and (now - self.last_sel_time) < 0.15:
             return
         self.last_sel_time = now
+        self._last_sel_key = sel_key
 
         vec_pnt = parse_vector(pnt)
 
         if self.step == 0:
             self.obj1 = obj_name
-            self.sub1 = sub if sub and "Edge" in sub else "Edge1"
+            self.sub1 = subname
             self.pnt1 = vec_pnt
             self.step = 1
             self._prompt()
             Gui.Selection.clearSelection()
             
         elif self.step == 1:
-            if obj_name == self.obj1 and self.sub1 == (sub if sub and "Edge" in sub else "Edge1"):
+            if obj_name == self.obj1 and self.sub1 == subname:
                 Gui.Selection.clearSelection()
                 return
                 
             self.obj2 = obj_name
-            self.sub2 = sub if sub and "Edge" in sub else "Edge1"
+            self.sub2 = subname
             self.pnt2 = vec_pnt
             
             self.step = 2
@@ -231,20 +235,35 @@ class FilletHandler:
             self.console.history.append("<span style='color:#55ff55;'>FILLET: Done</span>")
             
     def _apply_radius(self):
+        doc = App.ActiveDocument
         try:
-            Gui.Selection.clearSelection()
-            # Επιλέγουμε τις γραμμές ξανά, οι οποίες πλέον ακουμπάνε τέλεια.
-            Gui.Selection.addSelection(App.ActiveDocument.Name, self.obj1, self.sub1)
-            Gui.Selection.addSelection(App.ActiveDocument.Name, self.obj2, self.sub2)
-            
-            # Καρφώνουμε το Radius στα Settings
-            App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft").SetFloat("filletRadius", Gui.ccad_fillet_radius)
-            
-            # Τρέχουμε το Native Command του FreeCAD. Θα δουλέψει ακαριαία χωρίς Task Panel.
-            Gui.runCommand("Draft_Fillet")
-            
-            self.console.history.append("<span style='color:#55ff55;'>FILLET: Done</span>")
+            import Draft
+
+            o1 = doc.getObject(self.obj1) if doc else None
+            o2 = doc.getObject(self.obj2) if doc else None
+            if not doc or not o1 or not o2:
+                raise RuntimeError("Source objects are no longer available")
+
+            params = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+            params.SetFloat("FilletRadius", float(Gui.ccad_fillet_radius))
+            params.SetFloat("filletRadius", float(Gui.ccad_fillet_radius))
+
+            self._open_transaction("Fillet")
+            fillet_obj = Draft.make_fillet([o1, o2], radius=float(Gui.ccad_fillet_radius), delete=True)
+            doc.recompute()
+            self._commit_transaction()
+
+            if fillet_obj:
+                try:
+                    Draft.autogroup(fillet_obj)
+                except Exception:
+                    pass
+
+            self.console.history.append(
+                f"<span style='color:#55ff55;'>FILLET: Done (R={Gui.ccad_fillet_radius})</span>"
+            )
         except Exception as e:
+            self._abort_transaction()
             self.console.history.append(f"<span style='color:#ff5555;'>FILLET Arc Error: {str(e)}</span>")
         finally:
             QtCore.QTimer.singleShot(100, Gui.Selection.clearSelection)

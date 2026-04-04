@@ -254,7 +254,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
-                     'MOVE_CCAD', 'COPY_CCAD', 'Draft_Rotate', 'Draft_Scale',
+                     'MOVE_CCAD', 'COPY_CCAD', 'TRIM_CCAD', 'EXTEND_CCAD',
+                     'FILLET_CCAD', 'Draft_Rotate', 'Draft_Scale',
                      'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
                      'Std_Redo')
         if freecad_cmd not in _keep_sel:
@@ -355,13 +356,17 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         # ── TRIM / EXTEND ──
         if freecad_cmd in ('TRIM_CCAD', 'EXTEND_CCAD'):
+            import importlib
+            importlib.reload(ccad_cmd_trim)
             mode = 'TRIM' if freecad_cmd == 'TRIM_CCAD' else 'EXTEND'
             ccad_cmd_trim.run(self, mode)
             return
 
         # ── FILLET ──
         if freecad_cmd == 'FILLET_CCAD':
+            import importlib
             import ccad_cmd_fillet
+            importlib.reload(ccad_cmd_fillet)
             ccad_cmd_fillet.run(self)
             return
 
