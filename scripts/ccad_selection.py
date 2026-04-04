@@ -26,6 +26,41 @@ def _close_dialog_safe():
             pass
 
 
+def _keep_edit_tools_enabled():
+    """Re-enable workbench actions while Draft_Edit grips are open."""
+    try:
+        cmd = getattr(App, 'activeDraftCommand', None)
+        cls_name = cmd.__class__.__name__ if cmd else ''
+        if 'Edit' not in cls_name:
+            return
+
+        mw = Gui.getMainWindow()
+        if not mw:
+            return
+
+        for action in mw.findChildren(QtGui.QAction):
+            try:
+                name = action.objectName() or ''
+                if (
+                    name.startswith(('Draft_', 'Std_', 'Part_', 'Sketcher_', 'Arch_', 'BIM_'))
+                    or name.endswith('_CCAD')
+                    or name.startswith('CCAD_')
+                    or 'ClassicCAD' in name
+                ):
+                    action.setEnabled(True)
+            except Exception:
+                pass
+
+        for widget in mw.findChildren(QtWidgets.QWidget):
+            try:
+                if isinstance(widget, (QtWidgets.QToolButton, QtWidgets.QPushButton)):
+                    widget.setEnabled(True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 # =========================================================
 # SELECTION BOX WIDGET
 # =========================================================
@@ -35,6 +70,8 @@ class SelectionBox(QtWidgets.QWidget):
         self.viewport = target_viewport
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
+        self.setStyleSheet('background: transparent;')
         self.start_pos = None
         self.current_pos = None
         self.is_active = False
@@ -312,6 +349,12 @@ class CCADSelectionLogic(QtCore.QObject):
         if not self.box.isVisible():
             self.box.show()
         self.box.raise_()
+        try:
+            cursor = getattr(Gui, 'ccad_cursor', None)
+            if cursor:
+                cursor.lower()
+        except Exception:
+            pass
         self.box.update()
         self.state = 1
 
@@ -334,6 +377,12 @@ class CCADSelectionLogic(QtCore.QObject):
         if not self.box.isVisible():
             self.box.show()
         self.box.raise_()
+        try:
+            cursor = getattr(Gui, 'ccad_cursor', None)
+            if cursor:
+                cursor.lower()
+        except Exception:
+            pass
         self._update_preview()
 
     def _finish_box(self, end_pos):
@@ -926,6 +975,8 @@ class AutoSelectionBlocker:
             sel_info = [(o.Document.Name, o.Name) for o in editable]
             self._gripped_objects = list(sel_info)
             Gui.runCommand("Draft_Edit")
+            QtCore.QTimer.singleShot(0, _keep_edit_tools_enabled)
+            QtCore.QTimer.singleShot(120, _keep_edit_tools_enabled)
             for dn, on in sel_info:
                 try:
                     if doc and doc.getObject(on):
@@ -964,10 +1015,11 @@ class SelectionObserver(QtCore.QObject):
         super().__init__()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(1000)
+        self.timer.start(250)
 
     def refresh(self):
         SelectionManager.force_pick_radius()
+        _keep_edit_tools_enabled()
         try:
             mw = Gui.getMainWindow()
             if mw:
@@ -1126,6 +1178,8 @@ class AdditiveSelectionFilter(QtCore.QObject):
                 except Exception:
                     pass
             Gui.runCommand("Draft_Edit")
+            QtCore.QTimer.singleShot(0, _keep_edit_tools_enabled)
+            QtCore.QTimer.singleShot(120, _keep_edit_tools_enabled)
             # Re-add: Draft_Edit may consume selection
             for d, n in sel_info:
                 try:

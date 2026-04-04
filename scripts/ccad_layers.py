@@ -53,11 +53,31 @@ def get_active_layer(doc):
 
 
 def get_object_layer(obj):
-    if not obj or not hasattr(obj, "InList"):
+    if not obj:
         return None
-    for parent in obj.InList:
-        if _is_layer_container(parent):
-            return parent
+
+    try:
+        from draftobjects.layer import get_layer as draft_get_layer
+
+        layer = draft_get_layer(obj)
+        if layer and _is_layer_container(layer):
+            return layer
+    except Exception:
+        pass
+
+    doc = getattr(obj, "Document", None) or App.ActiveDocument
+    if doc:
+        try:
+            for candidate in doc.Objects:
+                if _is_layer_container(candidate) and obj in list(getattr(candidate, "Group", []) or []):
+                    return candidate
+        except Exception:
+            pass
+
+    if hasattr(obj, "InList"):
+        for parent in obj.InList:
+            if _is_layer_container(parent):
+                return parent
     return None
 
 
@@ -130,7 +150,18 @@ def assign_to_layer(obj, layer=None):
     if not target_layer or not hasattr(target_layer, "Group"):
         return False
 
-    for parent in list(getattr(obj, "InList", [])):
+    seen = set()
+    all_parents = list(getattr(obj, "InList", []))
+    try:
+        all_parents.extend([candidate for candidate in doc.Objects if _is_layer_container(candidate)])
+    except Exception:
+        pass
+
+    for parent in all_parents:
+        parent_name = getattr(parent, 'Name', None)
+        if not parent_name or parent_name in seen:
+            continue
+        seen.add(parent_name)
         if parent != target_layer and _is_layer_container(parent):
             _layer_remove_object(parent, obj)
 
@@ -274,6 +305,76 @@ def _layer_style_signature(layer):
         else:
             sig.append(value)
     return tuple(sig)
+
+
+def _selection_layer_signature(doc=None):
+    doc = doc or App.ActiveDocument
+    try:
+        selected = Gui.Selection.getSelection()
+    except Exception:
+        selected = []
+
+    sig = []
+    for obj in selected:
+        try:
+            if doc and getattr(obj, 'Document', None) != doc:
+                continue
+            layer = get_object_layer(obj)
+            sig.append(getattr(layer, 'Name', '__NONE__'))
+        except Exception:
+            sig.append('__ERR__')
+    return tuple(sorted(sig))
+
+
+def sync_layer_dropdown_to_selection(doc=None):
+    doc = doc or App.ActiveDocument
+    toolbar = getattr(Gui, 'draftToolBar', None)
+    button = getattr(toolbar, 'autoGroupButton', None) if toolbar else None
+    if not doc or not toolbar or button is None:
+        return
+
+    try:
+        selection = [obj for obj in Gui.Selection.getSelection() if getattr(obj, 'Document', None) == doc]
+    except Exception:
+        selection = []
+
+    unique_layers = []
+    for obj in selection:
+        layer = get_object_layer(obj)
+        if layer and _is_layer_container(layer):
+            if all(getattr(existing, 'Name', None) != getattr(layer, 'Name', None) for existing in unique_layers):
+                unique_layers.append(layer)
+
+    try:
+        if not selection:
+            active = get_active_layer(doc)
+            if active and _is_layer_container(active):
+                button.setText(active.Label)
+                if hasattr(active, 'ViewObject') and active.ViewObject:
+                    button.setIcon(active.ViewObject.Icon)
+                button.setToolTip('Autogroup: ' + active.Label)
+                button.setDown(False)
+            return
+
+        if len(unique_layers) == 1:
+            layer = unique_layers[0]
+            button.setText(layer.Label)
+            if hasattr(layer, 'ViewObject') and layer.ViewObject:
+                button.setIcon(layer.ViewObject.Icon)
+            button.setToolTip('Selection layer: ' + layer.Label)
+            button.setDown(False)
+        elif len(unique_layers) > 1:
+            button.setText('Varies')
+            button.setIcon(QtGui.QIcon.fromTheme('Draft_AutoGroup_off', QtGui.QIcon(':/icons/button_invalid.svg')))
+            button.setToolTip('Selection spans multiple layers')
+            button.setDown(False)
+        else:
+            button.setText('')
+            button.setIcon(QtGui.QIcon.fromTheme('Draft_AutoGroup_off', QtGui.QIcon(':/icons/button_invalid.svg')))
+            button.setToolTip('Selection has no assigned layer')
+            button.setDown(False)
+    except Exception:
+        pass
 
 
 def sync_style_to_active_layer(doc=None, layer=None):
@@ -439,9 +540,107 @@ def _patch_runtime_hooks():
             orig_proceed = gui_groups.SetAutoGroup.proceed
 
             def patched_proceed(self, option):
+                doc = getattr(self, 'doc', None) or App.ActiveDocument
+                toolbar = getattr(Gui, 'draftToolBar', None)
+                preserved_active_name = getattr(toolbar, 'autogroup', None) if toolbar else None
+
+                try:
+                    if hasattr(self, 'ui') and self.ui:
+                        self.ui.sourceCmd = None
+                except Exception:
+                    pass
+
+                selection = []
+                try:
+                    selection = [
+                        obj for obj in Gui.Selection.getSelection()
+                        if getattr(obj, 'Document', None) == doc and not _is_layer_container(obj)
+                    ]
+                except Exception:
+                    selection = []
+
+                def _restore_active_layer():
+                    if not toolbar:
+                        return
+                    try:
+                        toolbar.setAutoGroup(preserved_active_name)
+                    except Exception:
+                        pass
+
+                if selection and option == self.labels[0]:
+                    changed = False
+                    try:
+                        if doc:
+                            doc.openTransaction("Remove from layer")
+                        for obj in selection:
+                            current = get_object_layer(obj)
+                            if current:
+                                _layer_remove_object(current, obj)
+                                changed = True
+                        if doc:
+                            if changed:
+                                doc.commitTransaction()
+                                doc.recompute()
+                            elif hasattr(doc, 'abortTransaction'):
+                                doc.abortTransaction()
+                    except Exception:
+                        pass
+                    _restore_active_layer()
+                    QtCore.QTimer.singleShot(0, lambda d=doc: sync_style_to_active_layer(d))
+                    QtCore.QTimer.singleShot(0, lambda d=doc: sync_layer_dropdown_to_selection(d))
+                    return None
+
+                if selection and doc and option not in (self.labels[0], self.labels[-1]):
+                    try:
+                        i = self.labels.index(option)
+                        target_name = self.names[i] if i < len(self.names) else None
+                        target_layer = doc.getObject(target_name) if target_name else None
+                    except Exception:
+                        target_layer = None
+
+                    if target_layer and _is_layer_container(target_layer):
+                        try:
+                            changed = False
+                            doc.openTransaction("Assign to layer")
+                            for obj in selection:
+                                changed = assign_to_layer(obj, target_layer) or changed
+                            if changed:
+                                doc.commitTransaction()
+                                doc.recompute()
+                            elif hasattr(doc, 'abortTransaction'):
+                                doc.abortTransaction()
+                        except Exception:
+                            pass
+                        _restore_active_layer()
+                        QtCore.QTimer.singleShot(0, lambda d=doc: sync_style_to_active_layer(d))
+                        QtCore.QTimer.singleShot(0, lambda d=doc: sync_layer_dropdown_to_selection(d))
+                        QtCore.QTimer.singleShot(150, lambda d=doc: sync_style_to_active_layer(d))
+                        QtCore.QTimer.singleShot(150, lambda d=doc: sync_layer_dropdown_to_selection(d))
+                        return None
+
                 result = orig_proceed(self, option)
-                QtCore.QTimer.singleShot(0, lambda: sync_style_to_active_layer(App.ActiveDocument))
-                QtCore.QTimer.singleShot(150, lambda: sync_style_to_active_layer(App.ActiveDocument))
+
+                if selection and doc:
+                    try:
+                        target_layer = get_active_layer(doc)
+                        if target_layer and _is_layer_container(target_layer):
+                            changed = False
+                            doc.openTransaction("Assign to layer")
+                            for obj in selection:
+                                changed = assign_to_layer(obj, target_layer) or changed
+                            if changed:
+                                doc.commitTransaction()
+                                doc.recompute()
+                            elif hasattr(doc, 'abortTransaction'):
+                                doc.abortTransaction()
+                    except Exception:
+                        pass
+                    _restore_active_layer()
+
+                QtCore.QTimer.singleShot(0, lambda d=doc: sync_style_to_active_layer(d))
+                QtCore.QTimer.singleShot(0, lambda d=doc: sync_layer_dropdown_to_selection(d))
+                QtCore.QTimer.singleShot(150, lambda d=doc: sync_style_to_active_layer(d))
+                QtCore.QTimer.singleShot(150, lambda d=doc: sync_layer_dropdown_to_selection(d))
                 return result
 
             gui_groups.SetAutoGroup.proceed = patched_proceed
@@ -456,6 +655,7 @@ class LayerStyleWatcher(QtCore.QObject):
         self._last_doc = None
         self._last_layer = None
         self._last_signature = None
+        self._last_selection_signature = None
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(350)
         self.timer.timeout.connect(self.sync_if_needed)
@@ -469,14 +669,22 @@ class LayerStyleWatcher(QtCore.QObject):
         layer = get_active_layer(doc) if doc else None
         layer_name = getattr(layer, "Name", None)
         signature = _layer_style_signature(layer)
+        selection_signature = _selection_layer_signature(doc)
 
-        if doc_name == self._last_doc and layer_name == self._last_layer and signature == self._last_signature:
+        if (
+            doc_name == self._last_doc
+            and layer_name == self._last_layer
+            and signature == self._last_signature
+            and selection_signature == self._last_selection_signature
+        ):
             return
 
         self._last_doc = doc_name
         self._last_layer = layer_name
         self._last_signature = signature
+        self._last_selection_signature = selection_signature
         sync_style_to_active_layer(doc, layer)
+        sync_layer_dropdown_to_selection(doc)
 
 
 def ensure_layer_0(doc, force_active=False):
@@ -538,6 +746,7 @@ def ensure_layer_0(doc, force_active=False):
                 pass
 
     sync_style_to_active_layer(doc, current_layer or l0)
+    sync_layer_dropdown_to_selection(doc)
 
 class DocumentObserver:
     def slotCreatedDocument(self, doc):

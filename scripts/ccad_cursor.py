@@ -280,6 +280,14 @@ class ClassicCursor(QtWidgets.QWidget):
         except Exception:
             return False
 
+    def _selection_box_active(self):
+        try:
+            sel_logic = getattr(Gui, 'ccad_sel_logic', None)
+            box = getattr(sel_logic, 'box', None) if sel_logic else None
+            return bool(box and getattr(box, 'is_active', False) and box.isVisible())
+        except Exception:
+            return False
+
     def sync(self):
         try:
             wb = Gui.activeWorkbench()
@@ -369,6 +377,15 @@ class ClassicCursor(QtWidgets.QWidget):
         else:
             if self.isHidden():
                 self.show()
+            if self._selection_box_active():
+                try:
+                    self.lower()
+                    sel_logic = getattr(Gui, 'ccad_sel_logic', None)
+                    if sel_logic and getattr(sel_logic, 'box', None):
+                        sel_logic.box.raise_()
+                except Exception:
+                    pass
+            else:
                 self.raise_()
             force_blank = (
                 typing_active
