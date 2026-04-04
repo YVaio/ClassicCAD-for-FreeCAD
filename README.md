@@ -4,11 +4,10 @@ It still has many bugs of course and also lacks many features, but I think it's 
 Unfortunately, I am no programmer, I also just recently used gitHub for the first time, though I quite grasp the way of thinking (I think), so what I achieved I did so with the help of AI and my guidance. 
 So, if any of you have the expertise, will and time, please do contribute!
 
+Features a separate "ClassicCAD" workbench.
+
 **INSTRUCTIONS:**
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside: C:\Users\username\AppData\Roaming\FreeCAD\v1-1\Mod\ClassicCAD
-
-**NOTE:** ClassicCAD now runs as its own standalone Draft-style workbench.
-It clones the Draft tools/UI it needs for ClassicCAD, but it no longer migrates or hijacks the actual Draft workbench.
 
 works with **stable version 1.1**
 
