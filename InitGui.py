@@ -15,7 +15,29 @@ class ClassicCADWorkbench(Workbench):
 
     MenuText = "ClassicCAD"
     ToolTip = "Draft UI with ClassicCAD behavior loaded only while this mode is active"
-    Icon = ""
+    Icon = """
+        /* XPM */
+        static char * xpm_x[] = {
+        "16 16 2 1",
+        "  c None",
+        ". c #FFFFFF",
+        "        .       ",
+        "        .       ",
+        "        .       ",
+        "        .       ",
+        "     .......    ",
+        "     .     .    ",
+        "     .     .    ",
+        " .....     .....",
+        "     .     .    ",
+        "     .     .    ",
+        "     .......    ",
+        "        .       ",
+        "        .       ",
+        "        .       ",
+        "        .       ",
+        "                "};
+        """
 
     @staticmethod
     def _classiccad_root():
