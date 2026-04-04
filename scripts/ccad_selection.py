@@ -5,6 +5,9 @@ from PySide6 import QtWidgets, QtCore, QtGui
 import ccad_cmd_xline
 
 
+_ORIGINAL_SELECTION_PREFS = {}
+
+
 def _has_active_draft_command():
     """True if a non-Edit Draft command is running or in continue-mode gap."""
     if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
@@ -1010,6 +1013,30 @@ class SelectionManager:
             param.SetUnsigned("PreselectionColor", 4294967040)
         except: pass
 
+    @staticmethod
+    def restore_pick_radius():
+        try:
+            prefs = dict(_ORIGINAL_SELECTION_PREFS)
+            if not prefs:
+                return
+
+            view = Gui.activeView()
+            param = App.ParamGet("User parameter:BaseApp/Preferences/View")
+            target_radius = int(prefs.get("PickSize", param.GetInt("PickSize")))
+            param.SetInt("PickSize", target_radius)
+
+            if view:
+                viewer = view.getViewer()
+                if hasattr(viewer, "setPickRadius"):
+                    viewer.setPickRadius(float(target_radius))
+
+            if "EnablePreselection" in prefs:
+                param.SetBool("EnablePreselection", bool(prefs["EnablePreselection"]))
+            if "PreselectionColor" in prefs:
+                param.SetUnsigned("PreselectionColor", int(prefs["PreselectionColor"]))
+        except Exception:
+            pass
+
 class SelectionObserver(QtCore.QObject):
     def __init__(self):
         super().__init__()
@@ -1199,6 +1226,17 @@ def setup():
     mw = Gui.getMainWindow()
     if not mw: return
 
+    draft_pref = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+    view_pref = App.ParamGet("User parameter:BaseApp/Preferences/View")
+    _ORIGINAL_SELECTION_PREFS.clear()
+    _ORIGINAL_SELECTION_PREFS.update({
+        "SubSelection": draft_pref.GetBool("SubSelection"),
+        "DraftEditMaxObjects": draft_pref.GetInt("DraftEditMaxObjects"),
+        "PickSize": view_pref.GetInt("PickSize"),
+        "EnablePreselection": view_pref.GetBool("EnablePreselection"),
+        "PreselectionColor": view_pref.GetUnsigned("PreselectionColor"),
+    })
+
     # Fix Draft Grid spacing zero error (gridSpacing is a string param, e.g. "10 mm")
     grid_param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
     grid_spacing_str = grid_param.GetString("gridSpacing", "")
@@ -1301,6 +1339,18 @@ def tear_down():
             del Gui.ccad_sel_logic
         except:
             pass
+
+    if hasattr(Gui, "ccad_pickadd_filter"):
+        try:
+            app = QtWidgets.QApplication.instance()
+            if app:
+                app.removeEventFilter(Gui.ccad_pickadd_filter)
+        except Exception:
+            pass
+        try:
+            del Gui.ccad_pickadd_filter
+        except Exception:
+            pass
     
     if hasattr(Gui, "ccad_auto_blocker"):
         try:
@@ -1315,6 +1365,16 @@ def tear_down():
             Gui.ccad_selection_observer.deleteLater()
             del Gui.ccad_selection_observer
         except: pass
+
+    try:
+        draft_pref = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        if _ORIGINAL_SELECTION_PREFS:
+            draft_pref.SetBool("SubSelection", bool(_ORIGINAL_SELECTION_PREFS.get("SubSelection", False)))
+            draft_pref.SetInt("DraftEditMaxObjects", int(_ORIGINAL_SELECTION_PREFS.get("DraftEditMaxObjects", 5)))
+    except Exception:
+        pass
+
+    SelectionManager.restore_pick_radius()
 
 if __name__ == "__main__":
     setup()

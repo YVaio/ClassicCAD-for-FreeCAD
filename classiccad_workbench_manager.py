@@ -136,6 +136,17 @@ def _cleanup_console():
 
 
 def _cleanup_cursor():
+    manager = getattr(Gui, "ccad_cursor_manager", None)
+    if manager is not None:
+        try:
+            if hasattr(manager, "timer"):
+                manager.timer.stop()
+        except Exception:
+            pass
+        _safe_delete_qobject(manager)
+        if hasattr(Gui, "ccad_cursor_manager"):
+            delattr(Gui, "ccad_cursor_manager")
+
     if hasattr(Gui, "ccad_cursor"):
         _safe_delete_qobject(getattr(Gui, "ccad_cursor", None))
         delattr(Gui, "ccad_cursor")
@@ -144,6 +155,35 @@ def _cleanup_cursor():
 
 
 def _cleanup_selection():
+    if QtWidgets is not None:
+        try:
+            app = QtWidgets.QApplication.instance()
+            pickadd = getattr(Gui, "ccad_pickadd_filter", None)
+            if app and pickadd:
+                app.removeEventFilter(pickadd)
+        except Exception:
+            pass
+
+    blocker = getattr(Gui, "ccad_auto_blocker", None)
+    if blocker is not None:
+        try:
+            App.removeDocumentObserver(blocker)
+        except Exception:
+            pass
+        try:
+            Gui.Selection.removeObserver(blocker)
+        except Exception:
+            pass
+
+    observer = getattr(Gui, "ccad_selection_observer", None)
+    if observer is not None:
+        try:
+            if hasattr(observer, "timer"):
+                observer.timer.stop()
+        except Exception:
+            pass
+        _safe_delete_qobject(observer)
+
     sel = getattr(Gui, "ccad_sel_logic", None)
     try:
         if sel and hasattr(sel, "viewport") and sel.viewport:
@@ -152,11 +192,21 @@ def _cleanup_selection():
         pass
     _safe_delete_qobject(getattr(sel, "box", None))
     _safe_delete_qobject(sel)
-    if hasattr(Gui, "ccad_sel_logic"):
-        delattr(Gui, "ccad_sel_logic")
+    for name in (
+        "ccad_sel_logic",
+        "ccad_pickadd_filter",
+        "ccad_auto_blocker",
+        "ccad_selection_observer",
+        "ccad_pickbox_only",
+    ):
+        if hasattr(Gui, name):
+            delattr(Gui, name)
 
 
 def _cleanup_layers():
+    mod = sys.modules.get("ccad_layers")
+    if mod:
+        _call_teardown(mod)
     obs = getattr(Gui, "ccad_layer_observer", None)
     if obs:
         try:
@@ -165,6 +215,15 @@ def _cleanup_layers():
             pass
         if hasattr(Gui, "ccad_layer_observer"):
             delattr(Gui, "ccad_layer_observer")
+
+
+def _purge_classiccad_modules():
+    for mod_name in list(sys.modules.keys()):
+        if mod_name.startswith("ccad_"):
+            try:
+                sys.modules.pop(mod_name, None)
+            except Exception:
+                pass
 
 
 def _cleanup_status_bar():
@@ -334,6 +393,7 @@ def deactivate():
     if not _STATE["active"]:
         _fallback_cleanup()
         _stop_watch_timer()
+        _purge_classiccad_modules()
         return
 
     for mod_name in reversed(MODULES):
@@ -343,6 +403,7 @@ def deactivate():
 
     _fallback_cleanup()
     _stop_watch_timer()
+    _purge_classiccad_modules()
     _STATE["active"] = False
     _STATE["loaded_modules"] = []
     App.Console.PrintLog("ClassicCAD: deactivated\n")

@@ -4,6 +4,9 @@ from PySide6 import QtCore, QtGui
 import Draft
 
 
+_PATCHED_ORIGINALS = {}
+
+
 def _is_restoring_state(obj=None, doc=None):
     try:
         if obj and hasattr(obj, "isRestoring") and obj.isRestoring():
@@ -455,6 +458,8 @@ def _patch_runtime_hooks():
         toolbar = getattr(Gui, 'draftToolBar', None)
         tb_cls = toolbar.__class__ if toolbar else None
         if tb_cls and hasattr(tb_cls, 'setAutoGroup') and not hasattr(tb_cls, '_ccad_layer_sync_patched'):
+            if 'draftToolBar.setAutoGroup' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['draftToolBar.setAutoGroup'] = tb_cls.setAutoGroup
             orig_set_auto_group = tb_cls.setAutoGroup
 
             def patched_set_auto_group(self, value=None):
@@ -477,6 +482,8 @@ def _patch_runtime_hooks():
     try:
         from draftguitools import gui_setstyle
         if hasattr(gui_setstyle, "Draft_SetStyle") and not hasattr(gui_setstyle.Draft_SetStyle, "_ccad_patched"):
+            if 'Draft_SetStyle.Activated' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['Draft_SetStyle.Activated'] = gui_setstyle.Draft_SetStyle.Activated
             orig_activated = gui_setstyle.Draft_SetStyle.Activated
             def patched_activated(self, *args, **kwargs):
                 if Gui.Control.activeDialog():
@@ -487,6 +494,14 @@ def _patch_runtime_hooks():
             gui_setstyle.Draft_SetStyle._ccad_patched = True
 
         if hasattr(gui_setstyle, "Draft_SetStyle_TaskPanel") and not hasattr(gui_setstyle.Draft_SetStyle_TaskPanel, "_ccad_patched"):
+            if 'Draft_SetStyle_TaskPanel.__init__' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['Draft_SetStyle_TaskPanel.__init__'] = gui_setstyle.Draft_SetStyle_TaskPanel.__init__
+            if 'Draft_SetStyle_TaskPanel.loadDefaults' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['Draft_SetStyle_TaskPanel.loadDefaults'] = gui_setstyle.Draft_SetStyle_TaskPanel.loadDefaults
+            if 'Draft_SetStyle_TaskPanel.accept' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['Draft_SetStyle_TaskPanel.accept'] = gui_setstyle.Draft_SetStyle_TaskPanel.accept
+            if 'Draft_SetStyle_TaskPanel.reject' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['Draft_SetStyle_TaskPanel.reject'] = gui_setstyle.Draft_SetStyle_TaskPanel.reject
             orig_panel_init = gui_setstyle.Draft_SetStyle_TaskPanel.__init__
             orig_load_defaults = gui_setstyle.Draft_SetStyle_TaskPanel.loadDefaults
             orig_accept = gui_setstyle.Draft_SetStyle_TaskPanel.accept
@@ -537,6 +552,8 @@ def _patch_runtime_hooks():
     try:
         from draftguitools import gui_groups
         if hasattr(gui_groups, 'SetAutoGroup') and not hasattr(gui_groups.SetAutoGroup, '_ccad_layer_sync_patched'):
+            if 'SetAutoGroup.proceed' not in _PATCHED_ORIGINALS:
+                _PATCHED_ORIGINALS['SetAutoGroup.proceed'] = gui_groups.SetAutoGroup.proceed
             orig_proceed = gui_groups.SetAutoGroup.proceed
 
             def patched_proceed(self, option):
@@ -816,12 +833,17 @@ class DocumentObserver:
             elif active_layer and hasattr(active_layer, "Group"):
                 assign_to_layer(item, active_layer)
 
-def setup():
+
+def tear_down():
     if hasattr(Gui, "ccad_layer_observer"):
         try:
             App.removeDocumentObserver(Gui.ccad_layer_observer)
+        except Exception:
+            pass
+        try:
             del Gui.ccad_layer_observer
-        except: pass
+        except Exception:
+            pass
 
     if hasattr(Gui, "ccad_layer_style_watcher"):
         try:
@@ -829,7 +851,52 @@ def setup():
             Gui.ccad_layer_style_watcher.deleteLater()
         except Exception:
             pass
-        del Gui.ccad_layer_style_watcher
+        try:
+            del Gui.ccad_layer_style_watcher
+        except Exception:
+            pass
+
+    try:
+        from draftguitools import gui_setstyle, gui_groups
+
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        tb_cls = toolbar.__class__ if toolbar else None
+        if tb_cls and 'draftToolBar.setAutoGroup' in _PATCHED_ORIGINALS:
+            tb_cls.setAutoGroup = _PATCHED_ORIGINALS['draftToolBar.setAutoGroup']
+            if hasattr(tb_cls, '_ccad_layer_sync_patched'):
+                delattr(tb_cls, '_ccad_layer_sync_patched')
+
+        if hasattr(gui_setstyle, 'Draft_SetStyle') and 'Draft_SetStyle.Activated' in _PATCHED_ORIGINALS:
+            gui_setstyle.Draft_SetStyle.Activated = _PATCHED_ORIGINALS['Draft_SetStyle.Activated']
+            if hasattr(gui_setstyle.Draft_SetStyle, '_ccad_patched'):
+                delattr(gui_setstyle.Draft_SetStyle, '_ccad_patched')
+
+        if hasattr(gui_setstyle, 'Draft_SetStyle_TaskPanel'):
+            panel_cls = gui_setstyle.Draft_SetStyle_TaskPanel
+            for key, attr in (
+                ('Draft_SetStyle_TaskPanel.__init__', '__init__'),
+                ('Draft_SetStyle_TaskPanel.loadDefaults', 'loadDefaults'),
+                ('Draft_SetStyle_TaskPanel.accept', 'accept'),
+                ('Draft_SetStyle_TaskPanel.reject', 'reject'),
+            ):
+                if key in _PATCHED_ORIGINALS:
+                    setattr(panel_cls, attr, _PATCHED_ORIGINALS[key])
+            if hasattr(panel_cls, '_ccad_patched'):
+                delattr(panel_cls, '_ccad_patched')
+
+        if hasattr(gui_groups, 'SetAutoGroup') and 'SetAutoGroup.proceed' in _PATCHED_ORIGINALS:
+            gui_groups.SetAutoGroup.proceed = _PATCHED_ORIGINALS['SetAutoGroup.proceed']
+            if hasattr(gui_groups.SetAutoGroup, '_ccad_layer_sync_patched'):
+                delattr(gui_groups.SetAutoGroup, '_ccad_layer_sync_patched')
+    except Exception:
+        pass
+
+    _PATCHED_ORIGINALS.clear()
+    if hasattr(Gui, 'ccad_style_task_panel'):
+        Gui.ccad_style_task_panel = None
+
+def setup():
+    tear_down()
 
     Gui.ccad_layer_observer = DocumentObserver()
     App.addDocumentObserver(Gui.ccad_layer_observer)
