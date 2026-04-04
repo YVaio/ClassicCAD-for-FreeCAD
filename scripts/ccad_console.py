@@ -468,8 +468,50 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if pickadd:
             pickadd._escaping = False
 
+    def _reassign_exploded_layer(self, object_names, layer_name):
+        doc = App.ActiveDocument
+        if not doc or not layer_name:
+            return
+        layer = doc.getObject(layer_name)
+        if not layer:
+            return
+
+        changed = False
+        for name in object_names or []:
+            obj = doc.getObject(name)
+            if not obj:
+                continue
+            if ccad_layers.assign_to_layer(obj, layer):
+                changed = True
+
+        if changed:
+            try:
+                proxy = getattr(getattr(layer, 'ViewObject', None), 'Proxy', None)
+                if proxy and hasattr(proxy, 'reassign_props'):
+                    proxy.reassign_props()
+            except Exception:
+                pass
+
+    def _copy_explode_style(self, src_obj, dst_obj, layer=None):
+        if not dst_obj:
+            return
+        try:
+            ccad_layers.assign_to_layer(dst_obj, layer)
+        except Exception:
+            pass
+
+        try:
+            src_view = getattr(src_obj, 'ViewObject', None)
+            dst_view = getattr(dst_obj, 'ViewObject', None)
+            if src_view and dst_view:
+                for attr in ('LineColor', 'LineWidth', 'DrawStyle', 'PointColor', 'PointSize', 'DisplayMode'):
+                    if hasattr(src_view, attr) and hasattr(dst_view, attr):
+                        setattr(dst_view, attr, getattr(src_view, attr))
+        except Exception:
+            pass
+
     def _explode(self):
-        """Break selected wires into individual Draft lines."""
+        """Break selected wires into individual Draft lines while preserving their layer."""
         import Draft
         sel = Gui.Selection.getSelection()
         if not sel:
@@ -478,28 +520,43 @@ class ClassicConsole(QtWidgets.QDockWidget):
             return
         doc = App.ActiveDocument
         count = 0
+        created_by_layer = {}
         for obj in sel:
             if not hasattr(obj, 'Shape') or obj.Shape.isNull():
                 continue
             edges = obj.Shape.Edges
             if len(edges) < 2:
                 continue  # single-edge object, nothing to explode
-            lc = None
+
             layer = ccad_layers.get_object_layer(obj) or ccad_layers.get_active_layer(doc)
-            if hasattr(obj, 'ViewObject') and hasattr(obj.ViewObject, 'LineColor'):
-                lc = tuple(obj.ViewObject.LineColor[:3]) + (0.0,)
+            layer_name = getattr(layer, 'Name', None) if layer else None
+            new_names = []
+
             for e in edges:
                 verts = e.Vertexes
                 if len(verts) >= 2:
                     w = Draft.make_wire(
                         [verts[0].Point, verts[-1].Point],
                         closed=False, face=False)
-                    ccad_layers.assign_to_layer(w, layer)
-                    if lc and hasattr(w, 'ViewObject'):
-                        w.ViewObject.LineColor = lc
+                    self._copy_explode_style(obj, w, layer)
+                    if w and getattr(w, 'Name', None):
+                        new_names.append(w.Name)
                     count += 1
+
+            if layer_name and new_names:
+                created_by_layer.setdefault(layer_name, []).extend(new_names)
+
             doc.removeObject(obj.Name)
+
         doc.recompute()
+
+        for layer_name, names in created_by_layer.items():
+            for delay in (0, 150, 500):
+                QtCore.QTimer.singleShot(
+                    delay,
+                    lambda n=list(names), l=layer_name: self._reassign_exploded_layer(n, l)
+                )
+
         Gui.Selection.clearSelection()
         self.history.append(
             f"<span style='color:#55ff55;'>EXPLODE: {count} lines created</span>")

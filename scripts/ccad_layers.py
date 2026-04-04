@@ -47,6 +47,64 @@ def get_object_layer(obj):
     return None
 
 
+def _layer_add_object(layer, obj):
+    if not layer or not obj or not hasattr(layer, "Group"):
+        return False
+
+    try:
+        if hasattr(layer, "addObject"):
+            layer.addObject(obj)
+            return True
+    except Exception:
+        pass
+
+    try:
+        proxy = getattr(layer, "Proxy", None)
+        if proxy and hasattr(proxy, "addObject"):
+            proxy.addObject(layer, obj)
+            return True
+    except Exception:
+        pass
+
+    try:
+        group = list(getattr(layer, "Group", []) or [])
+        if obj not in group:
+            group.append(obj)
+            layer.Group = group
+        return True
+    except Exception:
+        return False
+
+
+def _layer_remove_object(layer, obj):
+    if not layer or not obj or not hasattr(layer, "Group"):
+        return False
+
+    try:
+        if hasattr(layer, "removeObject"):
+            layer.removeObject(obj)
+            return True
+    except Exception:
+        pass
+
+    try:
+        proxy = getattr(layer, "Proxy", None)
+        if proxy and hasattr(proxy, "removeObject"):
+            proxy.removeObject(layer, obj)
+            return True
+    except Exception:
+        pass
+
+    try:
+        group = list(getattr(layer, "Group", []) or [])
+        if obj in group:
+            group.remove(obj)
+            layer.Group = group
+        return True
+    except Exception:
+        return False
+
+
 def assign_to_layer(obj, layer=None):
     if not obj:
         return False
@@ -55,21 +113,15 @@ def assign_to_layer(obj, layer=None):
         return False
 
     target_layer = layer or get_object_layer(obj) or get_active_layer(doc)
-    if not target_layer or not hasattr(target_layer, "addObject"):
+    if not target_layer or not hasattr(target_layer, "Group"):
         return False
 
     for parent in list(getattr(obj, "InList", [])):
-        if parent != target_layer and _is_layer_container(parent) and hasattr(parent, "removeObject"):
-            try:
-                parent.removeObject(obj)
-            except Exception:
-                pass
+        if parent != target_layer and _is_layer_container(parent):
+            _layer_remove_object(parent, obj)
 
-    if obj not in getattr(target_layer, "Group", []):
-        try:
-            target_layer.addObject(obj)
-        except Exception:
-            return False
+    if obj not in list(getattr(target_layer, "Group", []) or []):
+        return _layer_add_object(target_layer, obj)
     return True
 
 
