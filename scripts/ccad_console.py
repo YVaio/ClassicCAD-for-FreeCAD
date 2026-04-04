@@ -6,6 +6,7 @@ import ccad_cmd_xline
 import ccad_cmd_trim
 import ccad_cmd_join
 import ccad_cmd_spline
+import ccad_cmd_copy
 
 
 def _handler_active():
@@ -80,8 +81,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'ELLIPSE': 'Draft_Ellipse',
             'PLINE': 'Draft_Wire',
             'POINT': 'Draft_Point',
-            'MOVE': 'Draft_Move',
-            'COPY': 'Draft_Copy',
+            'MOVE': 'MOVE_CCAD',
+            'COPY': 'COPY_CCAD',
             'ROTATE': 'Draft_Rotate',
             'SCALE': 'Draft_Scale',
             'MIRROR': 'Draft_Mirror',
@@ -248,7 +249,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
-                     'Draft_Move', 'Draft_Copy', 'Draft_Rotate', 'Draft_Scale',
+                     'MOVE_CCAD', 'COPY_CCAD', 'Draft_Rotate', 'Draft_Scale',
                      'Draft_Mirror', 'Draft_Offset', 'Std_Delete')
         if freecad_cmd not in _keep_sel:
             self._auto_deselect()
@@ -299,6 +300,15 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── EXPLODE ──
         if freecad_cmd == 'EXPLODE_CCAD':
             self._explode()
+            return
+        
+        # ── MOVE / COPY ──
+        if freecad_cmd == 'MOVE_CCAD':
+            ccad_cmd_copy.run(self, copy_mode=False)
+            return
+
+        if freecad_cmd == 'COPY_CCAD':
+            ccad_cmd_copy.run(self, copy_mode=True)
             return
 
         # ── Standard FreeCAD / Draft commands ──
@@ -363,6 +373,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             if len(edges) < 2:
                 continue  # single-edge object, nothing to explode
             lc = None
+            layer = ccad_layers.get_object_layer(obj) or ccad_layers.get_active_layer(doc)
             if hasattr(obj, 'ViewObject') and hasattr(obj.ViewObject, 'LineColor'):
                 lc = tuple(obj.ViewObject.LineColor[:3]) + (0.0,)
             for e in edges:
@@ -371,6 +382,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
                     w = Draft.make_wire(
                         [verts[0].Point, verts[-1].Point],
                         closed=False, face=False)
+                    ccad_layers.assign_to_layer(w, layer)
                     if lc and hasattr(w, 'ViewObject'):
                         w.ViewObject.LineColor = lc
                     count += 1

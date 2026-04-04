@@ -3,13 +3,60 @@ import FreeCADGui as Gui
 from PySide6 import QtCore
 import Draft
 
+def _is_layer_container(obj):
+    if not obj:
+        return False
+    type_id = getattr(obj, "TypeId", "") or ""
+    name = getattr(obj, "Name", "") or ""
+    label = getattr(obj, "Label", "") or ""
+    return hasattr(obj, "Group") and (
+        "Layer" in type_id or name.startswith("Layer") or label == "0"
+    )
+
+
 def get_active_layer(doc):
     param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
     layer_name = param.GetString("CurrentLayer", "")
     if layer_name:
         layer = doc.getObject(layer_name)
-        if layer: return layer
+        if layer:
+            return layer
     return next((o for o in doc.Objects if o.Label == "0" or o.Name == "Layer0"), None)
+
+
+def get_object_layer(obj):
+    if not obj or not hasattr(obj, "InList"):
+        return None
+    for parent in obj.InList:
+        if _is_layer_container(parent):
+            return parent
+    return None
+
+
+def assign_to_layer(obj, layer=None):
+    if not obj:
+        return False
+    doc = getattr(obj, "Document", None) or App.ActiveDocument
+    if not doc:
+        return False
+
+    target_layer = layer or get_object_layer(obj) or get_active_layer(doc)
+    if not target_layer or not hasattr(target_layer, "addObject"):
+        return False
+
+    for parent in list(getattr(obj, "InList", [])):
+        if parent != target_layer and _is_layer_container(parent) and hasattr(parent, "removeObject"):
+            try:
+                parent.removeObject(obj)
+            except Exception:
+                pass
+
+    if obj not in getattr(target_layer, "Group", []):
+        try:
+            target_layer.addObject(obj)
+        except Exception:
+            return False
+    return True
 
 def ensure_layer_0(doc):
     if not doc: return
@@ -68,8 +115,9 @@ class DocumentObserver:
         if obj.TypeId in ('App::Origin', 'App::Line', 'App::Plane'): return
 
         obj_name = obj.Name
-        # Αυξημένος χρόνος στα 500ms για να προλάβει το Rectangle να φτιάξει το Wire του
-        QtCore.QTimer.singleShot(500, lambda: self.move_to_active_layer(obj_name))
+        # Re-apply after a few delays so generated child wires inherit the correct layer.
+        for delay in (150, 500, 1000):
+            QtCore.QTimer.singleShot(delay, lambda n=obj_name: self.move_to_active_layer(n))
 
     def move_to_active_layer(self, obj_name):
         doc = App.ActiveDocument
@@ -77,10 +125,10 @@ class DocumentObserver:
         obj = doc.getObject(obj_name)
         if not obj: return
 
-        active_layer = get_active_layer(doc)
-        if not active_layer or not hasattr(active_layer, "Group"): return
+        target_layer = get_object_layer(obj) or get_active_layer(doc)
+        if not target_layer or not hasattr(target_layer, "Group"): return
 
-        # Μεταφορά αντικειμένου και των εξαρτημάτων του (π.χ. Rectangle Wire)
+        # Keep the object's existing layer if it already has one; otherwise use the active layer.
         objects_to_move = [obj]
         if hasattr(obj, "OutList"):
             for child in obj.OutList:
@@ -88,15 +136,8 @@ class DocumentObserver:
                     objects_to_move.append(child)
 
         for item in objects_to_move:
-            if hasattr(item, "InList"):
-                for parent in list(item.InList):
-                    if hasattr(parent, "removeObject") and parent != active_layer:
-                        try: parent.removeObject(item)
-                        except Exception: pass
-            
-            if item not in active_layer.Group:
-                try: active_layer.addObject(item)
-                except Exception: pass
+            item_layer = get_object_layer(item) or target_layer
+            assign_to_layer(item, item_layer)
 
 def setup():
     if hasattr(Gui, "ccad_layer_observer"):

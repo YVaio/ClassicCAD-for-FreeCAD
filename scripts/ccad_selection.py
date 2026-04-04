@@ -722,9 +722,7 @@ class AutoSelectionBlocker:
             pts = [rot.multVec(pt) + base for pt in pts]
             
             # Grab layer and visual properties before deleting
-            layer = getattr(obj, 'Layer', None)
-            if not layer:
-                layer = ccad_layers.get_active_layer(doc)
+            layer = ccad_layers.get_object_layer(obj) or ccad_layers.get_active_layer(doc)
             lc = None
             lw = None
             if hasattr(obj, 'ViewObject') and obj.ViewObject:
@@ -734,12 +732,7 @@ class AutoSelectionBlocker:
             doc.removeObject(obj.Name)
             
             wire = Draft.make_wire(pts, closed=True, face=False)
-            # Assign to active layer
-            if layer and hasattr(layer, 'addObject'):
-                try:
-                    layer.addObject(wire)
-                except Exception:
-                    pass
+            ccad_layers.assign_to_layer(wire, layer)
             # Transfer visual properties
             if wire and hasattr(wire, 'ViewObject') and wire.ViewObject:
                 if lc is not None:

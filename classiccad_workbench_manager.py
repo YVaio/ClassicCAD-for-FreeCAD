@@ -32,6 +32,7 @@ MODULES = [
 ]
 
 COMMAND_MODULES = [
+    "ccad_cmd_copy",
     "ccad_cmd_fillet",
     "ccad_cmd_join",
     "ccad_cmd_spline",
