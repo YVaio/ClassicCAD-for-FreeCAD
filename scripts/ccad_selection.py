@@ -1000,12 +1000,6 @@ class AdditiveSelectionFilter(QtCore.QObject):
     def eventFilter(self, obj, event):
         if not self.active or self._escaping:
             return False
-        if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
-            return False
-        if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
-            return False
-        if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
-            return False
 
         if event.type() == QtCore.QEvent.Type.KeyPress and event.key() == QtCore.Qt.Key_Escape:
             # Console text editing takes priority
@@ -1016,14 +1010,17 @@ class AdditiveSelectionFilter(QtCore.QObject):
             sel_logic = getattr(Gui, 'ccad_sel_logic', None)
             if sel_logic:
                 sel_logic.cancel_box()
-            # Cancel XLINE
-            if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
-                Gui.ccad_xline_handler._cleanup()
-                return True
-            # Cancel TRIM/EXTEND
-            if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
-                Gui.ccad_trim_handler._cleanup()
-                return True
+
+            for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler'):
+                handler = getattr(Gui, attr, None)
+                if handler:
+                    cleanup = getattr(handler, '_cleanup', None)
+                    if not callable(cleanup):
+                        cleanup = getattr(handler, 'cleanup', None)
+                    if callable(cleanup):
+                        cleanup()
+                    return True
+
             # If a non-Edit Draft command is running, let FreeCAD handle ESC
             if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
                 cls = App.activeDraftCommand.__class__.__name__ or ''
@@ -1033,6 +1030,15 @@ class AdditiveSelectionFilter(QtCore.QObject):
             # Full escape (Edit grips or idle)
             self.handle_full_escape()
             return True
+
+        if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+            return False
+        if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
+            return False
+        if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
+            return False
+        if hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler:
+            return False
 
         try:
             if hasattr(obj, 'metaObject') and "View3DInventor" in obj.metaObject().className():

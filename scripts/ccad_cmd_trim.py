@@ -165,34 +165,173 @@ def _apply_target_point(obj, info, new_world_point, pick_world):
             obj.X2, obj.Y2, obj.Z2 = new_local.x, new_local.y, new_local.z
 
 
+def _line_parameter(a, b, p):
+    dx = b.x - a.x
+    dy = b.y - a.y
+    dz = b.z - a.z
+    denom = dx * dx + dy * dy + dz * dz
+    if denom < 1e-12:
+        return 0.0
+    return ((p.x - a.x) * dx + (p.y - a.y) * dy + (p.z - a.z) * dz) / denom
+
+
+def _boundary_key(obj_name, subname):
+    return (str(obj_name), _edge_index(subname))
+
+
+def _find_best_intersection(doc, target_name, target_sub, target_info, pick_world, boundaries, mode):
+    if not doc or not boundaries:
+        return None
+
+    a_world = target_info['a_world']
+    b_world = target_info['b_world']
+    end_index = _choose_endpoint(a_world, b_world, pick_world, a_world)
+    target_key = _boundary_key(target_name, target_sub)
+    best_score = None
+    best_point = None
+    eps = 1e-6
+
+    for boundary in boundaries:
+        obj_name = boundary['obj_name']
+        subname = boundary['sub']
+        if _boundary_key(obj_name, subname) == target_key:
+            continue
+
+        obj = doc.getObject(obj_name)
+        if not obj:
+            continue
+
+        boundary_seg = _get_boundary_segment(obj, subname)
+        if not boundary_seg:
+            continue
+
+        intersection = intersect_2d(a_world, b_world, boundary_seg[0], boundary_seg[1])
+        if not intersection:
+            continue
+
+        t = _line_parameter(a_world, b_world, intersection)
+        if mode == 'TRIM':
+            if end_index == 0:
+                if not (eps < t <= 1.0 + eps):
+                    continue
+                score = abs(t)
+            else:
+                if not (-eps <= t < 1.0 - eps):
+                    continue
+                score = abs(1.0 - t)
+        else:
+            if end_index == 0:
+                if not (t < -eps):
+                    continue
+                score = abs(t)
+            else:
+                if not (t > 1.0 + eps):
+                    continue
+                score = abs(t - 1.0)
+
+        if best_score is None or score < best_score:
+            best_score = score
+            best_point = intersection
+
+    return best_point
+
+
 class TrimExtendHandler:
     def __init__(self, console, mode):
         self.console = console
         self.mode = (mode or 'TRIM').upper()
         self.step = 0
-        self.target_name = None
-        self.target_sub = None
-        self.target_pick = None
-        self.boundary_name = None
-        self.boundary_sub = None
+        self.boundaries = []
         self.last_sel_time = time.time()
         self._txn_open = False
+
+        preselected = []
+        try:
+            preselected = list(Gui.Selection.getSelectionEx())
+        except Exception:
+            preselected = []
 
         Gui.Selection.clearSelection()
         Gui.Selection.addObserver(self)
         Gui.ccad_trim_handler = self
+
+        if preselected:
+            for sel in preselected:
+                obj_name = getattr(sel, 'ObjectName', None)
+                if not obj_name:
+                    continue
+                subnames = list(getattr(sel, 'SubElementNames', []) or ['Edge1'])
+                for subname in subnames:
+                    if 'Edge' in str(subname):
+                        self._add_boundary(obj_name, str(subname), silent=True)
+            if self.boundaries:
+                self.console.history.append(
+                    f"<span style='color:#aaa;'>{self.mode}: {len(self.boundaries)} cutting edge(s) preselected. Press Enter to continue or select more.</span>"
+                )
+
         self._prompt()
 
     def _prompt(self):
         if self.step == 0:
-            verb = 'trim' if self.mode == 'TRIM' else 'extend'
+            count = len(self.boundaries)
+            suffix = f" ({count} selected)" if count else ""
             self.console.history.append(
-                f"<span style='color:#aaa;'>{self.mode}: Select object to {verb}.</span>"
+                f"<span style='color:#aaa;'>{self.mode}: Select cutting edges{suffix}. Press Enter when done or Esc to cancel.</span>"
             )
         elif self.step == 1:
+            verb = 'trim' if self.mode == 'TRIM' else 'extend'
             self.console.history.append(
-                f"<span style='color:#aaa;'>{self.mode}: Select cutting boundary.</span>"
+                f"<span style='color:#aaa;'>{self.mode}: Select object to {verb}. Click more objects to continue; press Enter or Esc to finish.</span>"
             )
+
+    def _add_boundary(self, obj_name, subname, silent=False):
+        key = _boundary_key(obj_name, subname)
+        for boundary in self.boundaries:
+            if _boundary_key(boundary['obj_name'], boundary['sub']) == key:
+                return False
+
+        self.boundaries.append({'obj_name': obj_name, 'sub': subname})
+        if not silent:
+            self.console.history.append(
+                f"<span style='color:#55ff55;'>{self.mode}: Cutting edge added ({len(self.boundaries)} total).</span>"
+            )
+        return True
+
+    def _on_input(self):
+        text = self.console.input.text().strip().upper()
+        self.console.input.clear()
+
+        if text in ('C', 'CANCEL'):
+            self.console.history.append(
+                f"<span style='color:#aaa;'>{self.mode}: Cancelled</span>"
+            )
+            self.cleanup()
+            return True
+
+        if self.step == 0:
+            if text == '':
+                if not self.boundaries:
+                    self.console.history.append(
+                        f"<span style='color:#ff5555;'>{self.mode}: Select at least one cutting edge first.</span>"
+                    )
+                else:
+                    self.step = 1
+                    try:
+                        Gui.Selection.clearSelection()
+                    except Exception:
+                        pass
+                    self._prompt()
+                return True
+            return False
+
+        if self.step == 1 and text == '':
+            self.console.history.append(
+                f"<span style='color:#aaa;'>{self.mode}: Finished</span>"
+            )
+            self.cleanup()
+            return True
+
+        return False
 
     def _open_transaction(self, name='Trim/extend'):
         doc = App.ActiveDocument
@@ -231,24 +370,18 @@ class TrimExtendHandler:
         pick = parse_vector(pnt)
 
         if self.step == 0:
-            self.target_name = obj_name
-            self.target_sub = subname
-            self.target_pick = pick
-            self.step = 1
-            Gui.Selection.clearSelection()
-            self._prompt()
+            self._add_boundary(obj_name, subname)
             return
 
         if self.step == 1:
-            if obj_name == self.target_name and subname == self.target_sub:
+            QtCore.QTimer.singleShot(
+                40,
+                lambda name=obj_name, edge=subname, picked=pick: self._execute_target(name, edge, picked),
+            )
+            try:
                 Gui.Selection.clearSelection()
-                return
-
-            self.boundary_name = obj_name
-            self.boundary_sub = subname
-            Gui.Selection.clearSelection()
-            self.step = 2
-            QtCore.QTimer.singleShot(40, self._execute)
+            except Exception:
+                pass
 
     def removeSelection(self, doc, obj_name, sub):
         pass
@@ -259,43 +392,42 @@ class TrimExtendHandler:
     def clearSelection(self, doc):
         pass
 
-    def _execute(self):
-        target = App.ActiveDocument.getObject(self.target_name) if App.ActiveDocument else None
-        boundary = App.ActiveDocument.getObject(self.boundary_name) if App.ActiveDocument else None
+    def _execute_target(self, target_name, target_sub, target_pick):
+        doc = App.ActiveDocument
+        target = doc.getObject(target_name) if doc else None
 
-        self.cleanup(clear_selection=False)
-
-        if not target or not boundary:
+        if not target or not self.boundaries:
             self.console.history.append(
                 f"<span style='color:#ff5555;'>{self.mode}: Invalid selection.</span>"
             )
             return
 
-        target_info = _get_target_info(target, self.target_sub)
-        boundary_seg = _get_boundary_segment(boundary, self.boundary_sub)
-
-        if not target_info or not boundary_seg:
+        target_info = _get_target_info(target, target_sub)
+        if not target_info:
             self.console.history.append(
                 f"<span style='color:#ff5555;'>{self.mode}: Only lines and wires are supported.</span>"
             )
             return
 
-        intersection = intersect_2d(
-            target_info['a_world'],
-            target_info['b_world'],
-            boundary_seg[0],
-            boundary_seg[1],
+        intersection = _find_best_intersection(
+            doc,
+            target_name,
+            target_sub,
+            target_info,
+            target_pick,
+            self.boundaries,
+            self.mode,
         )
         if not intersection:
             self.console.history.append(
-                f"<span style='color:#ff5555;'>{self.mode}: Objects are parallel or do not intersect.</span>"
+                f"<span style='color:#ff5555;'>{self.mode}: No valid cutting edge found for that side.</span>"
             )
             return
 
         try:
             self._open_transaction('Trim/extend')
-            _apply_target_point(target, target_info, intersection, self.target_pick)
-            App.ActiveDocument.recompute()
+            _apply_target_point(target, target_info, intersection, target_pick)
+            doc.recompute()
             self._commit_transaction()
             self.console.history.append(
                 f"<span style='color:#55ff55;'>{self.mode}: Done</span>"
@@ -305,11 +437,6 @@ class TrimExtendHandler:
             self.console.history.append(
                 f"<span style='color:#ff5555;'>{self.mode} Error: {str(exc)}</span>"
             )
-        finally:
-            try:
-                Gui.Selection.clearSelection()
-            except Exception:
-                pass
 
     def cleanup(self, clear_selection=True):
         try:

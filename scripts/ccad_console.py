@@ -181,6 +181,11 @@ class ClassicConsole(QtWidgets.QDockWidget):
             if spline._on_input():
                 return
 
+        trim = getattr(Gui, 'ccad_trim_handler', None)
+        if trim and hasattr(trim, '_on_input'):
+            if trim._on_input():
+                return
+
         # Fillet handler only intercepts when waiting for radius or R input
         fillet = getattr(Gui, 'ccad_fillet_handler', None)
         if fillet and hasattr(fillet, '_on_input'):
@@ -388,10 +393,41 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
     def _cleanup_handlers(self):
         """Clean up any active interactive handlers."""
-        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler'):
+        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler'):
             handler = getattr(Gui, attr, None)
             if handler and hasattr(handler, 'cleanup'):
                 handler.cleanup()
+
+    def _cancel_active_handler(self):
+        """Cancel any running ClassicCAD interactive tool."""
+        tools = (
+            ('ccad_trim_handler', 'TRIM/EXTEND'),
+            ('ccad_fillet_handler', 'FILLET'),
+            ('ccad_xline_handler', 'XLINE'),
+            ('ccad_spline_handler', 'SPLINE'),
+        )
+        for attr, label in tools:
+            handler = getattr(Gui, attr, None)
+            if not handler:
+                continue
+
+            try:
+                toolbar = getattr(Gui, 'draftToolBar', None)
+                if toolbar and hasattr(toolbar, 'escape'):
+                    try:
+                        toolbar.escape()
+                    except Exception:
+                        pass
+
+                cleanup = getattr(handler, '_cleanup', None)
+                if not callable(cleanup):
+                    cleanup = getattr(handler, 'cleanup', None)
+                if callable(cleanup):
+                    cleanup()
+            finally:
+                self.history.append(f"<span style='color:#aaa;'>{label}: Cancelled</span>")
+            return True
+        return False
 
     def _close_grips(self):
         """Close Draft_Edit to remove grip markers from the viewport."""
@@ -502,6 +538,16 @@ class ClassicConsole(QtWidgets.QDockWidget):
                     self.input.clear()
                     return True
 
+                sel_logic = getattr(Gui, 'ccad_sel_logic', None)
+                if sel_logic:
+                    try:
+                        sel_logic.cancel_box()
+                    except Exception:
+                        pass
+
+                if self._cancel_active_handler():
+                    return True
+
             if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
                                QtCore.Qt.Key_Space):
                 if is_input and fw != self.input:
@@ -538,9 +584,11 @@ class CCADFocusStealer(QtCore.QObject):
             if QtCore.Qt.Key_A <= key <= QtCore.Qt.Key_Z and key not in (QtCore.Qt.Key_X, QtCore.Qt.Key_Y, QtCore.Qt.Key_Z):
                 spline_active = hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler
                 xline_active = hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler
+                trim_active = hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler
+                fillet_active = hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler
                 
                 # Αν τρέχουν τα εργαλεία μας, ρίχνουμε το focus βίαια στην κονσόλα!
-                if spline_active or xline_active:
+                if spline_active or xline_active or trim_active or fillet_active:
                     if hasattr(Gui, "classic_console"):
                         cmd_input = Gui.classic_console.input
                         if QtWidgets.QApplication.focusWidget() != cmd_input:
@@ -585,7 +633,9 @@ def setup():
 
         # Εξαίρεση: Αν τρέχουν τα εργαλεία μας
         handler_running = (hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler) or \
-                          (hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler)
+                          (hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler) or \
+                          (hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler) or \
+                          (hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler)
 
         if handler_running and is_letter and char.upper() not in ('X', 'Y', 'Z'):
             if hasattr(Gui, "classic_console"):
