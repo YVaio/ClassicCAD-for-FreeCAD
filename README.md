@@ -1,5 +1,5 @@
 ### BRIEF
-This project started because me and many other engineers need a free alternative for 2D drafting or 3D modeling, that has a familiar CAD workflow, like other commercial software.
+This project started because me and many other architects need a free alternative for 2D drafting or 3D modeling, that has a familiar CAD workflow, like other commercial software.
 It still has many bugs of course and also lacks many features, but I think it's a first step to get the idea and what I can do with python on FreeCAD. 
 
 Unfortunately, I am no programmer, I also just recently used gitHub for the first time, though I quite grasp the way of thinking (I think), so what I achieved I did so with the help of AI and my guidance. 
