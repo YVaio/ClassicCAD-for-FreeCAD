@@ -36,6 +36,7 @@ COMMAND_MODULES = [
     "ccad_cmd_fillet",
     "ccad_cmd_join",
     "ccad_cmd_spline",
+    "ccad_cmd_stretch",
     "ccad_cmd_trim",
     "ccad_cmd_xline",
 ]
@@ -273,6 +274,7 @@ def _cleanup_misc_handlers():
         "ccad_trim_handler",
         "ccad_fillet_handler",
         "ccad_spline_handler",
+        "ccad_stretch_handler",
     ):
         obj = getattr(Gui, name, None)
         _safe_delete_qobject(obj)

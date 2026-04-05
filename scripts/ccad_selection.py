@@ -8,6 +8,12 @@ import ccad_cmd_xline
 _ORIGINAL_SELECTION_PREFS = {}
 
 
+def _suspend_auto_grips(seconds=2.0):
+    blocker = getattr(Gui, 'ccad_auto_blocker', None)
+    if blocker:
+        blocker._suppress_until = max(getattr(blocker, '_suppress_until', 0.0), time.time() + seconds)
+
+
 def _has_active_draft_command():
     """True if a non-Edit Draft command is running or in continue-mode gap."""
     if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
@@ -775,22 +781,38 @@ class CCADSelectionLogic(QtCore.QObject):
         pickadd = getattr(Gui, 'ccad_pickadd_filter', None)
         if pickadd:
             pickadd.previous_selection = []
+            pickadd._pending_target = ''
+            pickadd._skip_restore = True
 
         blocker = getattr(Gui, 'ccad_auto_blocker', None)
         if blocker:
             blocker._opening_grips = True
 
-        if not (QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier):
+        shift_remove = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier)
+        if not shift_remove:
+            Gui.Selection.clearSelection()
+            selected = 0
+            for real_name in names:
+                try:
+                    if doc.getObject(real_name):
+                        Gui.Selection.addSelection(doc.Name, real_name)
+                        selected += 1
+                except Exception:
+                    pass
+        else:
+            remove_names = set(names)
+            existing = Gui.Selection.getSelectionEx()
+            kept = [rec for rec in existing if rec.ObjectName not in remove_names]
             Gui.Selection.clearSelection()
 
-        selected = 0
-        for real_name in names:
-            try:
-                if doc.getObject(real_name):
-                    Gui.Selection.addSelection(doc.Name, real_name)
-                    selected += 1
-            except Exception:
-                pass
+            selected = 0
+            for rec in kept:
+                try:
+                    if doc.getObject(rec.ObjectName):
+                        Gui.Selection.addSelection(rec.DocumentName or doc.Name, rec.ObjectName)
+                        selected += 1
+                except Exception:
+                    pass
 
         # If Draft opened edit mode from the second click, close it back down.
         try:
@@ -858,6 +880,7 @@ class AutoSelectionBlocker:
         self._opening_grips = False
         self._gripped_objects = []
         self._last_cmd_time = 0
+        self._suppress_until = 0.0
 
     def slotCreatedObject(self, obj):
         try:
@@ -918,6 +941,8 @@ class AutoSelectionBlocker:
 
     def _draft_command_active(self):
         """True if a Draft drawing command (not Draft_Edit) is running."""
+        if time.time() < self._suppress_until:
+            return True
         if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
             cmd = App.activeDraftCommand
             cls_name = cmd.__class__.__name__ if cmd else ''
@@ -1061,6 +1086,55 @@ class AdditiveSelectionFilter(QtCore.QObject):
         self.previous_selection = []
         self.active = True
         self._escaping = False
+        self._pending_mode = None
+        self._pending_target = ''
+        self._skip_restore = False
+
+    def _current_preselection_name(self):
+        try:
+            pre = Gui.Selection.getPreselection()
+            if pre and getattr(pre, 'ObjectName', None):
+                return pre.ObjectName
+        except Exception:
+            pass
+        return ''
+
+    def _restore_selection_records(self, records):
+        blocker = getattr(Gui, 'ccad_auto_blocker', None)
+        has_edit = (
+            hasattr(App, 'activeDraftCommand') and App.activeDraftCommand
+            and 'Edit' in (App.activeDraftCommand.__class__.__name__ or '')
+        )
+
+        try:
+            if blocker:
+                blocker._opening_grips = True
+            self.active = False
+            Gui.Selection.clearSelection()
+            for rec in records:
+                doc_name = getattr(rec, 'DocumentName', '')
+                obj_name = getattr(rec, 'ObjectName', '')
+                if not obj_name:
+                    continue
+                try:
+                    target_doc = App.getDocument(doc_name) if doc_name else App.ActiveDocument
+                except Exception:
+                    target_doc = App.ActiveDocument
+                if target_doc and target_doc.getObject(obj_name):
+                    Gui.Selection.addSelection(doc_name or target_doc.Name, obj_name)
+        except Exception:
+            pass
+        finally:
+            self.active = True
+            if blocker:
+                blocker._opening_grips = False
+
+        if has_edit:
+            sel = Gui.Selection.getSelection()
+            if sel:
+                self._refresh_grips(sel)
+            else:
+                _close_dialog_safe()
 
     def handle_full_escape(self):
         if self._escaping:
@@ -1099,14 +1173,17 @@ class AdditiveSelectionFilter(QtCore.QObject):
             if sel_logic:
                 sel_logic.cancel_box()
 
-            for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler'):
+            for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler'):
                 handler = getattr(Gui, attr, None)
                 if handler:
                     cleanup = getattr(handler, '_cleanup', None)
                     if not callable(cleanup):
                         cleanup = getattr(handler, 'cleanup', None)
                     if callable(cleanup):
-                        cleanup()
+                        try:
+                            cleanup(cancelled=True)
+                        except TypeError:
+                            cleanup()
                     return True
 
             # If a non-Edit Draft command is running, let FreeCAD handle ESC
@@ -1132,19 +1209,38 @@ class AdditiveSelectionFilter(QtCore.QObject):
             if hasattr(obj, 'metaObject') and "View3DInventor" in obj.metaObject().className():
                 if event.type() == QtCore.QEvent.Type.MouseButtonPress:
                     if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        if event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier:
+                        modifiers = event.modifiers()
+                        if modifiers == QtCore.Qt.KeyboardModifier.NoModifier:
                             self.previous_selection = Gui.Selection.getSelectionEx()
+                            self._pending_mode = 'add'
+                            self._pending_target = ''
+                        elif modifiers == QtCore.Qt.KeyboardModifier.ShiftModifier:
+                            self.previous_selection = Gui.Selection.getSelectionEx()
+                            self._pending_mode = 'remove'
+                            self._pending_target = self._current_preselection_name()
+                        else:
+                            self._pending_mode = None
+                            self._pending_target = ''
 
                 elif event.type() == QtCore.QEvent.Type.MouseButtonRelease:
                     if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        if event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier:
+                        pending_mode = self._pending_mode
+                        self._pending_mode = None
+                        if pending_mode == 'add':
                             QtCore.QTimer.singleShot(15, self.restore_additive)
+                        elif pending_mode == 'remove':
+                            QtCore.QTimer.singleShot(15, self.restore_subtractive)
         except Exception:
             pass
         return False
 
     def restore_additive(self):
         if not self.active or self._escaping:
+            return
+        if self._skip_restore:
+            self._skip_restore = False
+            self.previous_selection = []
+            self._pending_target = ''
             return
         try:
             current = Gui.Selection.getSelectionEx()
@@ -1184,6 +1280,44 @@ class AdditiveSelectionFilter(QtCore.QObject):
                     self._refresh_grips(Gui.Selection.getSelection())
         except Exception:
             pass
+
+    def restore_subtractive(self):
+        if not self.active or self._escaping:
+            return
+        if self._skip_restore:
+            self._skip_restore = False
+            self.previous_selection = []
+            self._pending_target = ''
+            return
+        try:
+            current = Gui.Selection.getSelectionEx()
+            current_names = set(s.ObjectName for s in current)
+            previous_records = [
+                rec for rec in self.previous_selection if getattr(rec, 'ObjectName', None)
+            ]
+            previous_names = set(rec.ObjectName for rec in previous_records)
+            removed_names = previous_names - current_names
+            added_names = current_names - previous_names
+
+            target_name = self._pending_target or ''
+            if target_name:
+                if target_name in previous_names:
+                    final_records = [rec for rec in previous_records if rec.ObjectName != target_name]
+                else:
+                    final_records = previous_records
+            elif len(removed_names) == 1 and not added_names:
+                final_records = [rec for rec in previous_records if rec.ObjectName not in removed_names]
+            elif current_names != previous_names:
+                final_records = previous_records
+            else:
+                return
+
+            self._restore_selection_records(final_records)
+        except Exception:
+            pass
+        finally:
+            self.previous_selection = []
+            self._pending_target = ''
 
     def _refresh_grips(self, sel):
         if self._escaping or not sel:

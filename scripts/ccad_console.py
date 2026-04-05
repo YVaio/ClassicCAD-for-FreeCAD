@@ -7,6 +7,7 @@ import ccad_cmd_trim
 import ccad_cmd_join
 import ccad_cmd_spline
 import ccad_cmd_copy
+import ccad_cmd_stretch
 
 
 def _handler_active():
@@ -86,7 +87,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'ROTATE': 'Draft_Rotate',
             'SCALE': 'Draft_Scale',
             'MIRROR': 'Draft_Mirror',
-            'STRETCH': 'Draft_Stretch',
+            'STRETCH': 'STRETCH_CCAD',
             'TRIM': 'TRIM_CCAD',
             'EXTEND': 'EXTEND_CCAD',
             'OFFSET': 'Draft_Offset',
@@ -255,6 +256,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
                      'MOVE_CCAD', 'COPY_CCAD', 'TRIM_CCAD', 'EXTEND_CCAD',
+                     'STRETCH_CCAD',
                      'FILLET_CCAD', 'Draft_Rotate', 'Draft_Scale',
                      'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
                      'Std_Redo')
@@ -362,6 +364,12 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ccad_cmd_trim.run(self, mode)
             return
 
+        if freecad_cmd == 'STRETCH_CCAD':
+            import importlib
+            importlib.reload(ccad_cmd_stretch)
+            ccad_cmd_stretch.run(self)
+            return
+
         # ── FILLET ──
         if freecad_cmd == 'FILLET_CCAD':
             import importlib
@@ -398,10 +406,16 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
     def _cleanup_handlers(self):
         """Clean up any active interactive handlers."""
-        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler'):
+        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler'):
             handler = getattr(Gui, attr, None)
-            if handler and hasattr(handler, 'cleanup'):
-                handler.cleanup()
+            if not handler:
+                continue
+            cleanup = getattr(handler, 'cleanup', None)
+            if callable(cleanup):
+                try:
+                    cleanup(cancelled=True)
+                except TypeError:
+                    cleanup()
 
     def _cancel_active_handler(self):
         """Cancel any running ClassicCAD interactive tool."""
@@ -410,6 +424,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ('ccad_fillet_handler', 'FILLET'),
             ('ccad_xline_handler', 'XLINE'),
             ('ccad_spline_handler', 'SPLINE'),
+            ('ccad_stretch_handler', 'STRETCH'),
         )
         for attr, label in tools:
             handler = getattr(Gui, attr, None)
@@ -428,7 +443,10 @@ class ClassicConsole(QtWidgets.QDockWidget):
                 if not callable(cleanup):
                     cleanup = getattr(handler, 'cleanup', None)
                 if callable(cleanup):
-                    cleanup()
+                    try:
+                        cleanup(cancelled=True)
+                    except TypeError:
+                        cleanup()
             finally:
                 self.history.append(f"<span style='color:#aaa;'>{label}: Cancelled</span>")
             return True

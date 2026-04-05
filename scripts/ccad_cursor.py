@@ -411,19 +411,27 @@ class ClassicCursor(QtWidgets.QWidget):
 
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
         busy = self.is_busy() or self._is_orbiting_or_panning
+        selection_box_active = self._selection_box_active()
+        cmd = getattr(App, 'activeDraftCommand', None)
+        cls_name = cmd.__class__.__name__ if cmd else ''
 
-        is_pickbox_cmd = False
+        cursor_mode = 'normal'
         if getattr(Gui, 'ccad_trim_handler', None) or getattr(Gui, 'ccad_fillet_handler', None):
-            is_pickbox_cmd = True
+            cursor_mode = 'pickbox'
+        elif cmd and 'Stretch' in cls_name:
+            step = int(getattr(cmd, 'step', 0) or 0)
+            if getattr(Gui, 'ccad_pickbox_only', False) and step <= 1:
+                cursor_mode = 'pickbox'
+            else:
+                cursor_mode = 'cross'
         elif getattr(Gui, 'ccad_pickbox_only', False):
-            is_pickbox_cmd = True
+            cursor_mode = 'cross' if selection_box_active else 'pickbox'
         else:
             try:
-                if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
-                    cls_name = App.activeDraftCommand.__class__.__name__ or ''
+                if cmd:
                     modify_cmds = ('Offset', 'Move', 'Copy', 'Rotate', 'Scale', 'Mirror')
-                    if any(cmd in cls_name for cmd in modify_cmds) and len(Gui.Selection.getSelection()) == 0:
-                        is_pickbox_cmd = True
+                    if any(name in cls_name for name in modify_cmds) and len(Gui.Selection.getSelection()) == 0:
+                        cursor_mode = 'pickbox'
             except Exception:
                 pass
 
@@ -446,7 +454,7 @@ class ClassicCursor(QtWidgets.QWidget):
 
         gap = 0 if busy else 5
 
-        if not is_pickbox_cmd:
+        if cursor_mode != 'pickbox':
             for vx, vy, col, dot in axes_data:
                 if dot > 0.999999999:
                     continue
@@ -458,7 +466,7 @@ class ClassicCursor(QtWidgets.QWidget):
                     painter.drawLine(p_c + unit * gap, p_c + unit * 10000)
                     painter.drawLine(p_c - unit * gap, p_c - unit * 10000)
 
-        if not busy or is_pickbox_cmd:
+        if cursor_mode != 'cross' and (not busy or cursor_mode == 'pickbox'):
             painter.setPen(QtGui.QPen(QtGui.QColor(col_w), 0))
             painter.drawRect(mx - 5, my - 5, 10, 10)
 
