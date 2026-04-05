@@ -1,3 +1,51 @@
+# Byte-compiled / caches
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Python virtual envs
+venv/
+.venv/
+env/
+.env/
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build / output
+dist/
+build/
+.coverage
+htmlcov/
+
+# Test / tooling cache
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+
+# IDEs / editors / OS
 .vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# local secret/token files (never commit tokens)
+project_token
+PROJECT_TOKEN
+secrets.*
+secrets.json
+*.key
+
+# Optional: lockfiles / package manifests SHOULD be committed
+# (do NOT ignore package-lock.json or pipfile/pipfile.lock unless you know what you're doing)

@@ -15,6 +15,7 @@ class ClassicCADWorkbench(Workbench):
 
     MenuText = "ClassicCAD"
     ToolTip = "Standalone Draft-style workbench with ClassicCAD behavior"
+    _initial_top_view_done = False
     Icon = """
         /* XPM */
         static char * xpm_x[] = {
@@ -62,6 +63,39 @@ class ClassicCADWorkbench(Workbench):
         cls._ensure_paths()
         import classiccad_workbench_manager as manager
         return manager
+
+    @staticmethod
+    def _qtcore_module():
+        try:
+            from PySide6 import QtCore as _QtCore
+        except Exception:
+            try:
+                from PySide2 import QtCore as _QtCore
+            except Exception:
+                _QtCore = None
+        return _QtCore
+
+    @staticmethod
+    def _resolved_startup_workbench():
+        start = "StartWorkbench"
+
+        try:
+            config_get = getattr(App, "ConfigGet", None)
+            if callable(config_get):
+                configured = config_get("StartWorkbench")
+                if configured:
+                    start = configured
+        except Exception:
+            pass
+
+        try:
+            prefs = App.ParamGet("User parameter:BaseApp/Preferences/General")
+            autoload = prefs.GetString("AutoloadModule", start) or start
+            if autoload == "$LastModule":
+                autoload = prefs.GetString("LastModule", start) or start
+            return autoload
+        except Exception:
+            return start
 
     def _init_draft_clone_ui(self):
         try:
@@ -207,6 +241,40 @@ class ClassicCADWorkbench(Workbench):
         if hasattr(grid_observer, "_view_observer_setup"):
             grid_observer._view_observer_setup()
 
+    @classmethod
+    def _schedule_initial_top_view(cls, manager, attempts=8, delay_ms=150):
+        if cls._initial_top_view_done:
+            return
+        if cls._resolved_startup_workbench() != cls.__name__:
+            return
+
+        qtcore = cls._qtcore_module()
+
+        def _apply(attempt=0):
+            if cls._initial_top_view_done:
+                return
+            try:
+                view = Gui.activeView()
+            except Exception:
+                view = None
+
+            if view:
+                manager._silent_top_view()
+                cls._initial_top_view_done = True
+                return
+
+            if qtcore is not None and (attempt + 1) < attempts:
+                qtcore.QTimer.singleShot(
+                    delay_ms,
+                    lambda next_attempt=attempt + 1: _apply(next_attempt),
+                )
+
+        if qtcore is None:
+            _apply()
+            return
+
+        qtcore.QTimer.singleShot(0, _apply)
+
     def Initialize(self):
         self.__class__._ensure_paths()
         self._init_draft_clone_ui()
@@ -229,13 +297,7 @@ class ClassicCADWorkbench(Workbench):
                 doc = App.ActiveDocument
                 if doc:
                     ccad_layers.ensure_layer_0(doc, force_active=True)
-                    try:
-                        from PySide6 import QtCore as _QtCore
-                    except Exception:
-                        try:
-                            from PySide2 import QtCore as _QtCore
-                        except Exception:
-                            _QtCore = None
+                    _QtCore = self.__class__._qtcore_module()
                     if _QtCore is not None:
                         _QtCore.QTimer.singleShot(
                             250,
@@ -245,6 +307,8 @@ class ClassicCADWorkbench(Workbench):
                 App.Console.PrintWarning(
                     "ClassicCAD: Layer 0 activation warning: %s\n" % layer_exc
                 )
+
+            self.__class__._schedule_initial_top_view(manager)
 
             App.Console.PrintMessage(
                 "ClassicCAD: standalone behavior layer activated.\n"
