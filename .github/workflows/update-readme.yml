@@ -1,34 +1,18 @@
-name: Update README with Project items
+  - name: Setup Node.js
+    uses: actions/setup-node@v4
+    with:
+      node-version: '20'
 
-on:
-  schedule:
-    - cron: '0 6 * * *'  # daily at 06:00 UTC — change as you like
-  workflow_dispatch: {}   # manual trigger
-
-jobs:
-  update-readme:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install dependencies
-        run: npm ci
-        working-directory: .
-
-      - name: Run README update
-        env:
-          # Use PROJECT_TOKEN secret if you created one; otherwise the workflow uses the default GITHUB_TOKEN.
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-        run: |
-          node scripts/update-readme.js \
-            --owner "YVaio" \
-            --project-number 1 \
-            --readme "README.md" \
-            --start-marker "<!-- PROJECT_ISSUES:START -->" \
-            --end-marker "<!-- PROJECT_ISSUES:END -->"
+  - name: Run README update
+    env:
+      # If your project is repo-scoped you can use the built-in token:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # If you need a PAT for user/org project, replace the line above with:
+      # GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    run: |
+      node scripts/update-readme.js \
+        --owner "YVaio" \
+        --project-number 1 \
+        --readme "README.md" \
+        --start-marker "<!-- PROJECT_ISSUES:START -->" \
+        --end-marker "<!-- PROJECT_ISSUES:END -->"
