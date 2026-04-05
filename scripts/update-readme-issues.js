@@ -1,171 +1,250 @@
 #!/usr/bin/env node
-
-// README issues updater for GitHub Actions
-// - Automatically inserts the start/end markers if they are missing or in the wrong order
-// - Replaces the content between the markers with the current issues list
-// Usage example:
-// node scripts/update-readme-issues.js --owner "YVaio" --repo "ClassicCAD-for-FreeCAD" --readme "README.md" --start-marker "<!-- ISSUES_LIST:START -->" --end-marker "<!-- ISSUES_LIST:END -->" --state "open" --per-page 100 --commit
+/**
+ * scripts/update-readme-issues-hierarchy.js
+ *
+ * Fetches repo issues and injects a hierarchical markdown list into README between markers.
+ *
+ * Usage:
+ *  node scripts/update-readme-issues-hierarchy.js --owner OWNER --repo REPO --readme README.md --state open --commit
+ *
+ * Environment:
+ *  - GH_TOKEN or GITHUB_TOKEN must be in env for API calls and optional commit.
+ *
+ * Hierarchy detection:
+ *  - Looks for "Parent: #123" (case-insensitive) in the issue body or title.
+ *  - Supports multi-level nesting if children also reference parents.
+ *
+ * No external libs required (uses Node's global fetch on Node >= 18).
+ */
 
 const fs = require('fs');
 const path = require('path');
-const child_process = require('child_process');
+const { execSync } = require('child_process');
 
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const map = {};
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith('--')) {
-      const key = args[i].slice(2);
-      const val = (i + 1 < args.length && !args[i + 1].startsWith('--')) ? args[++i] : 'true';
-      map[key] = val;
-    }
-  }
-  return map;
+function argvGet(name, def) {
+  const idx = process.argv.indexOf('--' + name);
+  if (idx === -1) return def;
+  return process.argv[idx + 1];
 }
 
-async function fetchAllIssues(owner, repo, state, per_page, token) {
-  per_page = Number(per_page) || 100;
-  let page = 1;
-  const issues = [];
-  while (true) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/issues?state=${state}&per_page=${per_page}&page=${page}`;
-    const res = await fetch(url, {
-      headers: {
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'update-readme-issues-script',
-        'Authorization': `token ${token}`
-      }
-    });
-    if (!res.ok) {
-      throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
+const OWNER = argvGet('owner');
+const REPO = argvGet('repo');
+const README = argvGet('readme', 'README.md');
+const START_MARKER = argvGet('start-marker', '<!-- ISSUES_LIST:START -->');
+const END_MARKER = argvGet('end-marker', '<!-- ISSUES_LIST:END -->');
+const STATE = argvGet('state', 'open'); // open | closed | all
+const LABEL = argvGet('label'); // optional label filter
+const PER_PAGE = parseInt(argvGet('per-page', '100'), 10);
+const MAX = argvGet('max') ? parseInt(argvGet('max'), 10) : null;
+const DO_COMMIT = process.argv.includes('--commit');
+
+if (!OWNER || !REPO) {
+  console.error('Missing required --owner or --repo argument.');
+  process.exit(1);
+}
+
+const GH_TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+if (!GH_TOKEN) {
+  console.error('Missing GH_TOKEN or GITHUB_TOKEN in environment. Add PROJECT_TOKEN secret and map to GH_TOKEN if needed.');
+  process.exit(1);
+}
+
+const API = `https://api.github.com`;
+
+async function fetchJson(url) {
+  const res = await globalThis.fetch(url, {
+    headers: {
+      Authorization: `bearer ${GH_TOKEN}`,
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'readme-issues-hierarchy-updater'
     }
-    const data = await res.json();
-    // exclude pull requests
-    const pageIssues = data.filter(i => !i.pull_request);
-    issues.push(...pageIssues);
-    if (data.length < per_page) break;
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+  }
+  return res.json();
+}
+
+async function fetchAllIssues() {
+  let page = 1;
+  let all = [];
+  while (true) {
+    const params = new URLSearchParams();
+    params.set('state', STATE);
+    params.set('per_page', String(PER_PAGE));
+    params.set('page', String(page));
+    if (LABEL) params.set('labels', LABEL);
+
+    const url = `${API}/repos/${OWNER}/${REPO}/issues?${params.toString()}`;
+    const items = await fetchJson(url);
+
+    // Filter out pull requests (the issues endpoint returns PRs too)
+    const issuesOnly = items.filter(i => !i.pull_request);
+
+    all = all.concat(issuesOnly);
+
+    if (MAX && all.length >= MAX) {
+      all = all.slice(0, MAX);
+      break;
+    }
+
+    if (items.length < PER_PAGE) break;
     page++;
   }
-  return issues;
+  return all;
 }
 
-function buildMarkdownList(issues) {
-  if (!issues.length) return '*No open issues.*\n';
-  return issues.map(i => {
-    const labels = (i.labels || []).map(l => `\`${l.name}\``).join(' ');
-    return `- [#${i.number}](${i.html_url}) ${i.title}${labels ? ' — ' + labels : ''}`;
-  }).join('\n') + '\n';
+// parent detection: look for "parent" followed by '#' and digits, e.g. "Parent: #123"
+function detectParentNumber(issue) {
+  const checks = [];
+  if (issue.title) checks.push(issue.title);
+  if (issue.body) checks.push(issue.body);
+  const text = checks.join('\n');
+  // common patterns:
+  // Parent: #123
+  // parent issue #123
+  // parent #123
+  // (parent #123) in title
+  const re = /parent(?:\s+issue)?\s*[:\-]?\s*#?(\d+)/i;
+  const m = text.match(re);
+  if (m && m[1]) return parseInt(m[1], 10);
+  return null;
 }
 
-function insertMarkersIfMissing(content, startMarker, endMarker) {
-  let startIdx = content.indexOf(startMarker);
-  let endIdx = content.indexOf(endMarker);
-
-  // If both present and in correct order, nothing to do.
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    return { content, startIdx, endIdx };
-  }
-
-  // Remove any stray markers to avoid duplication (handles reversed order too)
-  let cleaned = content.split(startMarker).join('');
-  cleaned = cleaned.split(endMarker).join('');
-
-  // Choose an insertion point: after a top-level H2 (## ) if present, otherwise append
-  const h2match = cleaned.match(/^##\s+/m);
-  const insertPos = h2match ? cleaned.indexOf(h2match[0]) : cleaned.length;
-
-  const markersBlock = `\n\n${startMarker}\n\n${endMarker}\n\n`;
-  const newContent = cleaned.slice(0, insertPos) + markersBlock + cleaned.slice(insertPos);
-
-  const newStartIdx = newContent.indexOf(startMarker);
-  const newEndIdx = newContent.indexOf(endMarker);
-
-  return { content: newContent, startIdx: newStartIdx, endIdx: newEndIdx };
+function firstLine(text, maxLen = 120) {
+  if (!text) return '';
+  const first = text.split('\n')[0].trim();
+  if (first.length <= maxLen) return first;
+  return first.slice(0, maxLen - 1) + '…';
 }
 
-async function main() {
-  const opts = parseArgs();
-  const owner = opts.owner;
-  const repo = opts.repo;
-  const readme = opts.readme || 'README.md';
-  const startMarker = opts['start-marker'] || '<!-- ISSUES_LIST:START -->';
-  const endMarker = opts['end-marker'] || '<!-- ISSUES_LIST:END -->';
-  const state = opts.state || 'open';
-  const per_page = opts['per-page'] || 100;
-  const doCommit = opts.commit === 'true' || opts.commit === '1' || opts.commit === true;
-  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+function escapeMarkdown(s) {
+  if (!s) return '';
+  return s.replace(/\n/g, ' ').replace(/\|/g, '\\|').replace(/\r/g, '');
+}
 
-  if (!owner || !repo) {
-    console.error('Missing --owner or --repo');
-    process.exit(2);
-  }
-  if (!token) {
-    console.error('Missing GH_TOKEN or GITHUB_TOKEN environment variable');
-    process.exit(2);
-  }
+function formatLine(issue, indentLevel = 0) {
+  const number = issue.number;
+  const title = issue.title || '(no title)';
+  const url = issue.html_url;
+  const state = issue.state; // open/closed
+  const checkbox = state === 'open' ? '- [ ]' : '- [x]';
+  const labels = (issue.labels || []).map(l => l.name).join(', ');
+  const labelPart = labels ? ` — ${labels}` : '';
+  const assignees = (issue.assignees || []).map(a => `@${a.login}`).join(', ');
+  const assigneePart = assignees ? ` — ${assignees}` : '';
+  const snippet = firstLine(issue.body || '', 140);
+  const created = (new Date(issue.created_at)).toISOString().slice(0,10);
+  const updated = (new Date(issue.updated_at)).toISOString().slice(0,10);
 
-  console.log(`Fetching ${state} issues for ${owner}/${repo}...`);
-  const issues = await fetchAllIssues(owner, repo, state, per_page, token);
-  const md = buildMarkdownList(issues);
+  const indent = '  '.repeat(indentLevel); // two spaces per level
+  const line = `${indent}${checkbox} [#${number} ${escapeMarkdown(title)}](${url}) — ${state}${labelPart}${assigneePart} — opened ${created} — updated ${updated}`;
+  const blockquote = snippet ? `\n${indent}> ${escapeMarkdown(snippet)}` : '';
+  return line + blockquote;
+}
 
-  const readmePath = path.resolve(process.cwd(), readme);
-  if (!fs.existsSync(readmePath)) {
-    console.error(`README file not found at path: ${readmePath}`);
-    process.exit(2);
-  }
+// Build tree from list of issues using parent references
+function buildIssueTree(issues) {
+  const map = new Map();
+  issues.forEach(i => map.set(i.number, { issue: i, children: [], parent: null }));
 
-  let content = fs.readFileSync(readmePath, 'utf8');
+  const roots = [];
 
-  // Ensure markers exist and are in the correct order; insert them if needed.
-  const inserted = insertMarkersIfMissing(content, startMarker, endMarker);
-  content = inserted.content;
-  let startIdx = inserted.startIdx;
-  let endIdx = inserted.endIdx;
-
-  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
-    // Defensive check; should not happen because insertMarkersIfMissing ensures markers
-    console.error('Failed to ensure start/end markers in README.');
-    process.exit(2);
-  }
-
-  console.log(`Start marker index: ${startIdx}, End marker index: ${endIdx}`);
-
-  const before = content.slice(0, startIdx + startMarker.length);
-  const after = content.slice(endIdx); // include the endMarker and the rest
-
-  const newContent = before + '\n\n' + md + '\n' + after;
-
-  if (newContent === content) {
-    console.log('README already up to date — nothing to commit.');
-    process.exit(0);
-  }
-
-  fs.writeFileSync(readmePath, newContent, 'utf8');
-  console.log('README updated on disk.');
-
-  if (doCommit) {
-    try {
-      const relativePath = path.relative(process.cwd(), readmePath) || readme;
-      child_process.execSync('git config user.email "action@github.com"');
-      child_process.execSync('git config user.name "GitHub Actions"');
-      child_process.execSync(`git add "${relativePath.replace(/"/g, '\\"')}"`);
-      // commit may fail if there are no staged changes; don't crash on that
-      try {
-        child_process.execSync(`git commit -m "Update README with ${state} issues"`);
-      } catch (e) {
-        console.log('No changes to commit or git commit failed (this is ok).');
-      }
-      // Push will use the checked-out repository credentials (GITHUB_TOKEN)
-      child_process.execSync('git push');
-      console.log('Changes pushed.');
-    } catch (err) {
-      console.error('Git push failed:', err.message);
-      process.exit(1);
+  for (const node of map.values()) {
+    const parentNum = detectParentNumber(node.issue);
+    if (parentNum && map.has(parentNum)) {
+      const parentNode = map.get(parentNum);
+      node.parent = parentNode;
+      parentNode.children.push(node);
+    } else {
+      roots.push(node);
     }
   }
+
+  // Optionally sort children (by number or created_at). We'll keep the original order.
+  return { map, roots };
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+function renderTreeNodes(nodes, out = [], indent = 0) {
+  // nodes is an array of {issue, children}
+  // We'll print each node then its children recursively
+  for (const node of nodes) {
+    out.push(formatLine(node.issue, indent));
+    if (node.children && node.children.length) {
+      // recursively render children
+      renderTreeNodes(node.children, out, indent + 1);
+    }
+  }
+  return out;
+}
+
+(async () => {
+  try {
+    console.log(`Fetching issues for ${OWNER}/${REPO} (state=${STATE}${LABEL ? `, label=${LABEL}` : ''}) ...`);
+    const issues = await fetchAllIssues();
+    console.log(`Fetched ${issues.length} issues.`);
+
+    // Build hierarchy
+    const { roots } = buildIssueTree(issues);
+    // Render
+    const header = `## Issues for ${OWNER}/${REPO}\n\nGenerated: ${new Date().toISOString()}\n\n`;
+    const rendered = renderTreeNodes(roots, [], 0).join('\n\n') || '_No matching issues found._';
+    const block = `${START_MARKER}\n\n${header}${rendered}\n\n${END_MARKER}`;
+
+    const readmePath = path.resolve(process.cwd(), README);
+    let readme = '';
+    if (fs.existsSync(readmePath)) {
+      readme = fs.readFileSync(readmePath, 'utf8');
+    } else {
+      console.warn(`README not found at ${readmePath}. Will create a new README.`);
+    }
+
+    let newReadme;
+    if (readme.includes(START_MARKER) && readme.includes(END_MARKER)) {
+      const before = readme.split(START_MARKER)[0];
+      const after = readme.split(END_MARKER).slice(1).join(END_MARKER);
+      newReadme = before + block + after;
+    } else {
+      newReadme = readme + '\n\n' + block + '\n';
+    }
+
+    if (newReadme === readme) {
+      console.log('No changes to README content. Exiting.');
+      process.exit(0);
+    }
+
+    fs.writeFileSync(readmePath, newReadme, 'utf8');
+    console.log(`Updated ${README} with ${issues.length} issues (${roots.length} top-level roots).`);
+
+    if (DO_COMMIT) {
+      try {
+        console.log('Committing README changes...');
+        execSync('git config user.name "github-actions[bot]"');
+        execSync('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"');
+        execSync(`git add ${escapeShellArg(README)}`);
+        execSync(`git commit -m "ci: sync README issues list (hierarchical, automated)"`);
+        const repoFull = process.env.GITHUB_REPOSITORY;
+        if (repoFull && GH_TOKEN) {
+          const remoteWithToken = `https://x-access-token:${GH_TOKEN}@github.com/${repoFull}.git`;
+          execSync(`git remote set-url origin ${remoteWithToken}`);
+        }
+        execSync('git push --set-upstream origin HEAD');
+        console.log('Pushed README update.');
+      } catch (err) {
+        console.error('Failed to commit/push README:', err && (err.stdout || err.stderr || err.message) || err);
+        process.exit(1);
+      }
+    }
+
+    process.exit(0);
+  } catch (err) {
+    console.error('Error:', err && (err.stack || err.message || String(err)));
+    process.exit(2);
+  }
+})();
+
+function escapeShellArg(s) {
+  if (!s) return "''";
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
