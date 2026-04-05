@@ -1,32 +1,18 @@
-name: Update README with repo issues
+  - name: Setup Node.js
+    uses: actions/setup-node@v4
+    with:
+      node-version: '20'
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 8 * * *' # daily at 08:00 UTC — change or remove if you don't want scheduled runs
-
-jobs:
-  update-readme-issues:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Run README issues updater
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node scripts/update-readme-issues.js \
-            --owner "YVaio" \
-            --repo "ClassicCAD-for-FreeCAD" \
-            --readme "README.md" \
-            --start-marker "<!-- ISSUES_LIST:START -->" \
-            --end-marker "<!-- ISSUES_LIST:END -->" \
-            --state "open" \
-            --per-page 100 \
-            --commit
+  - name: Run README issues updater
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    run: |
+      node scripts/update-readme-issues.js \
+        --owner "YVaio" \
+        --repo "ClassicCAD-for-FreeCAD" \
+        --readme "README.md" \
+        --start-marker "<!-- ISSUES_LIST:START -->" \
+        --end-marker "<!-- ISSUES_LIST:END -->" \
+        --state "open" \
+        --per-page 100 \
+        --commit
