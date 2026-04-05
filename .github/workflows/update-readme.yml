@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
         run: |
           node scripts/update-readme.js \
-            --owner "OWNER" \
+            --owner "YVaio" \
             --project-number 1 \
             --readme "README.md" \
             --start-marker "<!-- PROJECT_ISSUES:START -->" \
