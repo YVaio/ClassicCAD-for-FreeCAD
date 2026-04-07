@@ -7,7 +7,10 @@ import ccad_cmd_trim
 import ccad_cmd_join
 import ccad_cmd_spline
 import ccad_cmd_copy
+import ccad_cmd_mirror
 import ccad_cmd_stretch
+import ccad_cmd_hatch
+import ccad_selection
 
 
 def _handler_active():
@@ -20,7 +23,50 @@ def _handler_active():
         return True
     if hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler:
         return True
+    if hasattr(Gui, 'ccad_stretch_handler') and Gui.ccad_stretch_handler:
+        return True
+    if hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler:
+        return True
     return False
+
+
+_LENGTH_FOCUS_COMMANDS = {
+    'Draft_Line',
+    'Draft_Wire',
+    'Draft_Rectangle',
+    'Draft_Offset',
+    'MOVE_CCAD',
+    'COPY_CCAD',
+    'MIRROR_CCAD',
+}
+
+
+class _TaskPanelConfirmFilter(QtCore.QObject):
+    def __init__(self, console, parent=None):
+        super().__init__(parent)
+        self.console = console
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() in (
+            QtCore.Qt.Key_Return,
+            QtCore.Qt.Key_Enter,
+            QtCore.Qt.Key_Space,
+        ):
+            if self.console._task_panel_input_target(obj):
+                event.accept()
+                return True
+
+        if event.type() == QtCore.QEvent.KeyPress and event.key() in (
+            QtCore.Qt.Key_Return,
+            QtCore.Qt.Key_Enter,
+            QtCore.Qt.Key_Space,
+        ):
+            target = self.console._task_panel_input_target(obj)
+            if target:
+                event.accept()
+                return self.console._confirm_task_panel_input(target)
+
+        return False
 
 
 class ClassicConsole(QtWidgets.QDockWidget):
@@ -34,6 +80,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'L': 'LINE',
             'C': 'CIRCLE',
             'A': 'ARC',
+            'BR': 'BREAK',
             'REC': 'RECTANG',
             'POL': 'POLYGON',
             'EL': 'ELLIPSE',
@@ -77,6 +124,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'LINE': 'Draft_Line',
             'CIRCLE': 'Draft_Circle',
             'ARC': 'Draft_Arc',
+            'BREAK': 'Draft_Split',
             'RECTANG': 'Draft_Rectangle',
             'POLYGON': 'Draft_Polygon',
             'ELLIPSE': 'Draft_Ellipse',
@@ -86,7 +134,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'COPY': 'COPY_CCAD',
             'ROTATE': 'Draft_Rotate',
             'SCALE': 'Draft_Scale',
-            'MIRROR': 'Draft_Mirror',
+            'MIRROR': 'MIRROR_CCAD',
             'STRETCH': 'STRETCH_CCAD',
             'TRIM': 'TRIM_CCAD',
             'EXTEND': 'EXTEND_CCAD',
@@ -96,7 +144,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'ERASE': 'Std_Delete',
             'EXPLODE': 'EXPLODE_CCAD',
             'JOIN': 'JOIN_CCAD',
-            'HATCH': 'Draft_Hatch',
+            'HATCH': 'HATCH_CCAD',
             'BOUNDARY': 'Draft_Upgrade',     # Το Upgrade του FreeCAD μετατρέπει wires σε faces (Region)
             'TEXT': 'Draft_Text',
             'MTEXT': 'Draft_ShapeString',    # Solid 3D κείμενο
@@ -116,6 +164,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
         }
 
         self.last_command = None
+        self._task_panel_key_filter = _TaskPanelConfirmFilter(self, self)
 
         self.main_widget = QtWidgets.QWidget()
         self.layout = QtWidgets.QVBoxLayout(self.main_widget)
@@ -167,6 +216,220 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if text.endswith(" "):
             self.execute()
 
+    def _widget_belongs_to(self, widget, ancestor):
+        current = widget
+        while current:
+            if current is ancestor:
+                return True
+            current = current.parentWidget() if hasattr(current, 'parentWidget') else None
+        return False
+
+    def _spinbox_for_widget(self, widget):
+        current = widget
+        while current:
+            if isinstance(current, QtWidgets.QAbstractSpinBox):
+                return current
+            current = current.parentWidget() if hasattr(current, 'parentWidget') else None
+        return None
+
+    def _draft_numeric_target(self, widget):
+        names = {'xValue', 'yValue', 'zValue', 'lengthValue', 'radiusValue', 'angleValue'}
+        current = widget
+        while current:
+            name = current.objectName() if hasattr(current, 'objectName') else ''
+            if name in names:
+                return self._spinbox_for_widget(current) or current
+            current = current.parentWidget() if hasattr(current, 'parentWidget') else None
+        return None
+
+    def _task_panel_input_target(self, widget=None):
+        widget = widget or QtWidgets.QApplication.focusWidget()
+        if not widget or widget == self.input:
+            return None
+
+        target = self._draft_numeric_target(widget) or self._spinbox_for_widget(widget)
+        if not target:
+            return None
+
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        active_dialog = None
+        try:
+            active_dialog = Gui.Control.activeDialog()
+        except Exception:
+            active_dialog = None
+
+        if toolbar and self._widget_belongs_to(target, toolbar):
+            return target
+        if active_dialog and self._widget_belongs_to(target, active_dialog):
+            return target
+        return None
+
+    def _task_panel_context_active(self, widget=None):
+        widget = widget or QtWidgets.QApplication.focusWidget()
+        if not widget or widget == self.input:
+            return False
+
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        active_dialog = None
+        try:
+            active_dialog = Gui.Control.activeDialog()
+        except Exception:
+            active_dialog = None
+
+        return bool(
+            (toolbar and self._widget_belongs_to(widget, toolbar))
+            or (active_dialog and self._widget_belongs_to(widget, active_dialog))
+        )
+
+    def _text_entry_command_active(self):
+        cmd = getattr(App, 'activeDraftCommand', None)
+        cls_name = getattr(getattr(cmd, '__class__', None), '__name__', '') if cmd else ''
+        return any(token in cls_name for token in ('Text', 'ShapeString', 'Label'))
+
+    def _focus_widget_contents(self, widget):
+        target = self._spinbox_for_widget(widget) or widget
+        line_edit = None
+        if isinstance(target, QtWidgets.QAbstractSpinBox):
+            try:
+                line_edit = target.lineEdit()
+            except Exception:
+                line_edit = None
+
+        focus_widget = line_edit or target
+        try:
+            focus_widget.setFocus(QtCore.Qt.OtherFocusReason)
+        except Exception:
+            return False
+
+        try:
+            if line_edit:
+                line_edit.selectAll()
+            elif hasattr(target, 'selectAll'):
+                target.selectAll()
+        except Exception:
+            pass
+        return True
+
+    def _focus_length_input(self):
+        if not self._is_non_edit_command() or self._text_entry_command_active():
+            return False
+
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        target = getattr(toolbar, 'lengthValue', None) if toolbar else None
+        if not target:
+            return False
+
+        try:
+            visible = target.isVisible() and target.isEnabled()
+        except Exception:
+            visible = False
+        if not visible:
+            return False
+
+        return self._focus_widget_contents(target)
+
+    def _install_task_panel_confirm_filters(self):
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        if not toolbar:
+            return False
+
+        installed = False
+        widgets = []
+        for name in ('xValue', 'yValue', 'zValue', 'lengthValue', 'angleValue', 'radiusValue'):
+            widget = getattr(toolbar, name, None)
+            if not widget:
+                continue
+            widgets.append(widget)
+            try:
+                widgets.extend(widget.findChildren(QtWidgets.QWidget))
+            except Exception:
+                pass
+
+        for widget in widgets:
+            try:
+                if widget.property('_ccadTaskPanelConfirmFilter'):
+                    continue
+                widget.installEventFilter(self._task_panel_key_filter)
+                widget.setProperty('_ccadTaskPanelConfirmFilter', True)
+                installed = True
+            except Exception:
+                pass
+        return installed
+
+    def _schedule_task_panel_confirm_filters(self, delays=None):
+        for delay in (delays or (0, 60, 160, 320, 520, 760)):
+            QtCore.QTimer.singleShot(delay, self._install_task_panel_confirm_filters)
+
+    def _schedule_length_focus(self, delays=None):
+        self._schedule_task_panel_confirm_filters(delays=delays)
+        for delay in (delays or (0, 60, 160, 320, 520, 760)):
+            QtCore.QTimer.singleShot(delay, self._focus_length_input)
+
+    def _confirm_task_panel_input(self, widget=None):
+        widget = widget or QtWidgets.QApplication.focusWidget()
+        target = self._task_panel_input_target(widget)
+        if not self._is_non_edit_command() or not (target or self._task_panel_context_active(widget)):
+            return False
+
+        if self._text_entry_command_active():
+            return False
+
+        active_dialog = None
+        try:
+            active_dialog = Gui.Control.activeDialog()
+        except Exception:
+            active_dialog = None
+
+        if isinstance(target, QtWidgets.QAbstractSpinBox):
+            try:
+                target.interpretText()
+            except Exception:
+                pass
+            try:
+                line_edit = target.lineEdit()
+                if line_edit:
+                    line_edit.deselect()
+            except Exception:
+                pass
+        else:
+            try:
+                target.deselect()
+            except Exception:
+                pass
+
+        toolbar = getattr(Gui, 'draftToolBar', None)
+        if toolbar:
+            validate_point = getattr(toolbar, 'validatePoint', None)
+            if callable(validate_point):
+                try:
+                    validate_point()
+                    return True
+                except TypeError:
+                    try:
+                        validate_point(False)
+                        return True
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        accept = getattr(active_dialog, 'accept', None) if active_dialog else None
+        if callable(accept):
+            try:
+                result = accept()
+                if result is not False:
+                    return True
+            except Exception:
+                pass
+
+        enter = QtGui.QKeyEvent(
+            QtCore.QEvent.KeyPress,
+            QtCore.Qt.Key_Return,
+            QtCore.Qt.NoModifier,
+        )
+        QtWidgets.QApplication.postEvent(active_dialog or toolbar or self, enter)
+        return True
+
     # ── command dispatch ──────────────────────
 
     def execute(self, force_repeat=False):
@@ -186,6 +449,11 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if trim and hasattr(trim, '_on_input'):
             if trim._on_input():
                 return
+
+        hatch = getattr(Gui, 'ccad_hatch_handler', None)
+        if hatch and hasattr(hatch, '_on_input'):
+            hatch._on_input()
+            return
 
         # Fillet handler only intercepts when waiting for radius or R input
         fillet = getattr(Gui, 'ccad_fillet_handler', None)
@@ -256,9 +524,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
                      'MOVE_CCAD', 'COPY_CCAD', 'TRIM_CCAD', 'EXTEND_CCAD',
-                     'STRETCH_CCAD',
+                     'STRETCH_CCAD', 'HATCH_CCAD', 'Draft_Split',
                      'FILLET_CCAD', 'Draft_Rotate', 'Draft_Scale',
-                     'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
+                     'MIRROR_CCAD', 'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
                      'Std_Redo')
         if freecad_cmd not in _keep_sel:
             self._auto_deselect()
@@ -394,19 +662,38 @@ class ClassicConsole(QtWidgets.QDockWidget):
         # ── MOVE / COPY ──
         if freecad_cmd == 'MOVE_CCAD':
             ccad_cmd_copy.run(self, copy_mode=False)
+            self._schedule_length_focus()
             return
 
         if freecad_cmd == 'COPY_CCAD':
             ccad_cmd_copy.run(self, copy_mode=True)
+            self._schedule_length_focus()
+            return
+
+        if freecad_cmd == 'MIRROR_CCAD':
+            import importlib
+            importlib.reload(ccad_cmd_mirror)
+            ccad_cmd_mirror.run(self)
+            self._schedule_length_focus()
+            return
+
+        if freecad_cmd == 'HATCH_CCAD':
+            import importlib
+            importlib.reload(ccad_cmd_hatch)
+            ccad_cmd_hatch.run(self)
+            self._schedule_task_panel_confirm_filters()
             return
 
         # ── Standard FreeCAD / Draft commands ──
         Gui.getMainWindow().setFocus()
         Gui.runCommand(freecad_cmd)
+        self._schedule_task_panel_confirm_filters()
+        if freecad_cmd in _LENGTH_FOCUS_COMMANDS:
+            self._schedule_length_focus()
 
     def _cleanup_handlers(self):
         """Clean up any active interactive handlers."""
-        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler'):
+        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler', 'ccad_hatch_handler'):
             handler = getattr(Gui, attr, None)
             if not handler:
                 continue
@@ -425,6 +712,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ('ccad_xline_handler', 'XLINE'),
             ('ccad_spline_handler', 'SPLINE'),
             ('ccad_stretch_handler', 'STRETCH'),
+            ('ccad_hatch_handler', 'HATCH'),
         )
         for attr, label in tools:
             handler = getattr(Gui, attr, None)
@@ -593,10 +881,25 @@ class ClassicConsole(QtWidgets.QDockWidget):
     # ── app-level event filter ────────────────
 
     def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Escape:
+            if ccad_selection.force_cancel_interaction(console=self, clear_console_input=True, log=True):
+                event.accept()
+                return True
+
         # Block Space shortcut to prevent Std_ToggleVisibility from hiding objects
+        if event.type() == QtCore.QEvent.ShortcutOverride and event.key() in (
+            QtCore.Qt.Key_Return,
+            QtCore.Qt.Key_Enter,
+            QtCore.Qt.Key_Space,
+        ):
+            fw = QtWidgets.QApplication.focusWidget()
+            if self._task_panel_context_active(fw):
+                event.accept()
+                return True
+
         if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Space:
             fw = QtWidgets.QApplication.focusWidget()
-            if not isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
+            if not isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
                 event.accept()
                 return True
 
@@ -609,27 +912,17 @@ class ClassicConsole(QtWidgets.QDockWidget):
                 return True
 
             fw = QtWidgets.QApplication.focusWidget()
-            is_input = isinstance(fw, (QtWidgets.QLineEdit,
-                                       QtWidgets.QDoubleSpinBox,
-                                       QtWidgets.QSpinBox))
+            task_target = self._task_panel_input_target(fw)
+            is_input = bool(task_target) or isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox))
 
             if event.key() == QtCore.Qt.Key_Escape:
-                if self.input.hasFocus() and self.input.text():
-                    self.input.clear()
-                    return True
-
-                sel_logic = getattr(Gui, 'ccad_sel_logic', None)
-                if sel_logic:
-                    try:
-                        sel_logic.cancel_box()
-                    except Exception:
-                        pass
-
-                if self._cancel_active_handler():
+                if ccad_selection.force_cancel_interaction(console=self, clear_console_input=True, log=True):
                     return True
 
             if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter,
                                QtCore.Qt.Key_Space):
+                if self._task_panel_context_active(fw):
+                    return self._confirm_task_panel_input(fw)
                 if is_input and fw != self.input:
                     return False
                 if fw == self.input:
@@ -666,9 +959,10 @@ class CCADFocusStealer(QtCore.QObject):
                 xline_active = hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler
                 trim_active = hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler
                 fillet_active = hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler
+                hatch_active = hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler
                 
                 # Αν τρέχουν τα εργαλεία μας, ρίχνουμε το focus βίαια στην κονσόλα!
-                if spline_active or xline_active or trim_active or fillet_active:
+                if spline_active or xline_active or trim_active or fillet_active or hatch_active:
                     if hasattr(Gui, "classic_console"):
                         cmd_input = Gui.classic_console.input
                         if QtWidgets.QApplication.focusWidget() != cmd_input:
@@ -715,7 +1009,8 @@ def setup():
         handler_running = (hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler) or \
                           (hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler) or \
                           (hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler) or \
-                          (hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler)
+                          (hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler) or \
+                          (hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler)
 
         if handler_running and is_letter and char.upper() not in ('X', 'Y', 'Z'):
             if hasattr(Gui, "classic_console"):
@@ -743,9 +1038,18 @@ def setup():
         s.activated.connect(lambda c=char: focus_and_type(c))
         Gui.ccad_shortcuts.append(s)
 
+    def trigger_console_or_confirm():
+        if not hasattr(Gui, "classic_console"):
+            return
+        console = Gui.classic_console
+        fw = QtWidgets.QApplication.focusWidget()
+        if console._confirm_task_panel_input(fw):
+            return
+        console.execute()
+
     for key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space):
         s = QtGui.QShortcut(QtGui.QKeySequence(key), mw)
-        s.activated.connect(Gui.classic_console.execute)
+        s.activated.connect(trigger_console_or_confirm)
         Gui.ccad_shortcuts.append(s)
 
 if __name__ == "__main__":

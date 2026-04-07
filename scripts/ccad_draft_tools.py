@@ -4,6 +4,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 _original_snap = None
 
+_DRAFT_PREFS_PATH = "User parameter:BaseApp/Preferences/Mod/Draft"
+
 _ORTHO_SUSPEND_CMDS = ('Rectangle',)
 
 
@@ -50,9 +52,18 @@ class ClassicDraftTools(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.mw = Gui.getMainWindow()
+        self._draft_params = App.ParamGet(_DRAFT_PREFS_PATH)
+        self._original_focus_on_length = self._draft_params.GetBool("focusOnLength", False)
+        self._draft_params.SetBool("focusOnLength", True)
         
         # Install app-level event filter so F3/F8 work even during commands
         QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def restore_preferences(self):
+        try:
+            self._draft_params.SetBool("focusOnLength", bool(self._original_focus_on_length))
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress and not event.isAutoRepeat():
@@ -129,6 +140,8 @@ def setup():
         try:
             if hasattr(Gui.ccad_draft_tools, 'timer'):
                 Gui.ccad_draft_tools.timer.stop()
+            if hasattr(Gui.ccad_draft_tools, 'restore_preferences'):
+                Gui.ccad_draft_tools.restore_preferences()
             app = QtWidgets.QApplication.instance()
             if app:
                 app.removeEventFilter(Gui.ccad_draft_tools)
@@ -149,6 +162,12 @@ def setup():
 def tear_down():
     global _original_snap
     from draftguitools.gui_snapper import Snapper
+    tool = getattr(Gui, 'ccad_draft_tools', None)
+    if tool and hasattr(tool, 'restore_preferences'):
+        try:
+            tool.restore_preferences()
+        except Exception:
+            pass
     if hasattr(Snapper, '_ccad_original_snap'):
         Snapper.snap = Snapper._ccad_original_snap
         del Snapper._ccad_original_snap

@@ -6,6 +6,230 @@ import ccad_cmd_xline
 
 
 _ORIGINAL_SELECTION_PREFS = {}
+_HANDLER_SPECS = (
+    ("ccad_xline_handler", "XLINE"),
+    ("ccad_trim_handler", "TRIM/EXTEND"),
+    ("ccad_fillet_handler", "FILLET"),
+    ("ccad_spline_handler", "SPLINE"),
+    ("ccad_stretch_handler", "STRETCH"),
+    ("ccad_hatch_handler", "HATCH"),
+)
+
+
+def _iter_active_handlers():
+    for attr, label in _HANDLER_SPECS:
+        handler = getattr(Gui, attr, None)
+        if handler:
+            yield attr, label, handler
+
+
+def _selection_box_active():
+    logic = getattr(Gui, "ccad_sel_logic", None)
+    return bool(logic and getattr(logic, "state", 0) == 1)
+
+
+def _dialog_active():
+    try:
+        return bool(Gui.Control.activeDialog())
+    except Exception:
+        return False
+
+
+def _clear_selection_safe():
+    try:
+        Gui.Selection.clearSelection()
+    except Exception:
+        pass
+
+
+def _is_hatch_like_object(obj):
+    if not obj:
+        return False
+    proxy = getattr(obj, "Proxy", None)
+    if getattr(proxy, "Type", "") == "Hatch":
+        return True
+    return all(hasattr(obj, name) for name in ("Base", "File", "Pattern", "Scale", "Rotation"))
+
+
+def _finish_forced_cancel():
+    _clear_selection_safe()
+
+    blocker = getattr(Gui, "ccad_auto_blocker", None)
+    if blocker:
+        blocker._opening_grips = False
+        blocker._gripped_objects = []
+
+    pickadd = getattr(Gui, "ccad_pickadd_filter", None)
+    if pickadd:
+        pickadd._escaping = False
+        pickadd._skip_restore = False
+        pickadd.previous_selection = []
+        pickadd._pending_mode = None
+        pickadd._pending_target = ""
+
+    copy_session = getattr(Gui, "ccad_copy_session", None)
+    if copy_session and hasattr(copy_session, "restore"):
+        try:
+            copy_session.restore()
+        except Exception:
+            pass
+
+
+def has_interaction_state():
+    if _selection_box_active():
+        return True
+
+    if any(True for _ in _iter_active_handlers()):
+        return True
+
+    if hasattr(App, "activeDraftCommand") and App.activeDraftCommand:
+        return True
+
+    blocker = getattr(Gui, "ccad_auto_blocker", None)
+    if blocker and (blocker._gripped_objects or blocker._opening_grips):
+        return True
+
+    try:
+        if Gui.Selection.getSelectionEx():
+            return True
+    except Exception:
+        pass
+
+    return _dialog_active()
+
+
+def force_cancel_interaction(console=None, clear_console_input=False, log=False):
+    console_input = getattr(console, "input", None) if console else None
+    had_console_text = bool(console_input and console_input.text())
+    if clear_console_input and had_console_text:
+        try:
+            console_input.clear()
+        except Exception:
+            pass
+
+    interaction_active = has_interaction_state()
+    if not interaction_active:
+        return bool(clear_console_input and had_console_text)
+
+    pickadd = getattr(Gui, "ccad_pickadd_filter", None)
+    if pickadd and pickadd._escaping:
+        return True
+
+    blocker = getattr(Gui, "ccad_auto_blocker", None)
+    had_selection_box = _selection_box_active()
+    had_handlers = [label for _, label, _handler in _iter_active_handlers()]
+    had_draft_command = bool(getattr(App, "activeDraftCommand", None))
+    had_dialog = _dialog_active()
+    try:
+        had_selection = bool(Gui.Selection.getSelectionEx())
+    except Exception:
+        had_selection = False
+    had_grips = bool(blocker and (blocker._gripped_objects or blocker._opening_grips))
+
+    if pickadd:
+        pickadd._escaping = True
+        pickadd._skip_restore = True
+        pickadd.previous_selection = []
+        pickadd._pending_mode = None
+        pickadd._pending_target = ""
+
+    if blocker:
+        blocker._opening_grips = True
+        blocker._gripped_objects = []
+        blocker._suppress_until = max(getattr(blocker, "_suppress_until", 0.0), time.time() + 0.25)
+
+    sel_logic = getattr(Gui, "ccad_sel_logic", None)
+    if sel_logic:
+        try:
+            sel_logic.cancel_box()
+        except Exception:
+            pass
+
+    for _attr, _label, handler in list(_iter_active_handlers()):
+        cleanup = getattr(handler, "_cleanup", None)
+        if not callable(cleanup):
+            cleanup = getattr(handler, "cleanup", None)
+        if callable(cleanup):
+            try:
+                cleanup(cancelled=True)
+            except TypeError:
+                cleanup()
+            except Exception:
+                pass
+
+    toolbar = getattr(Gui, "draftToolBar", None)
+    if toolbar and (had_draft_command or had_dialog):
+        escape = getattr(toolbar, "escape", None)
+        finish = getattr(toolbar, "finish", None)
+        if callable(escape):
+            try:
+                escape()
+            except Exception:
+                pass
+        elif callable(finish):
+            try:
+                finish(cont=False)
+            except TypeError:
+                finish(False)
+            except Exception:
+                pass
+
+    active_cmd = getattr(App, "activeDraftCommand", None)
+    if active_cmd:
+        finish = getattr(active_cmd, "finish", None)
+        if callable(finish):
+            try:
+                finish(cont=False)
+            except TypeError:
+                finish()
+            except Exception:
+                pass
+
+    active_dialog = None
+    try:
+        active_dialog = Gui.Control.activeDialog()
+    except Exception:
+        active_dialog = None
+    if active_dialog and hasattr(active_dialog, "reject"):
+        try:
+            active_dialog.reject()
+        except Exception:
+            pass
+
+    try:
+        if getattr(Gui, "ActiveDocument", None) and hasattr(Gui.ActiveDocument, "resetEdit"):
+            Gui.ActiveDocument.resetEdit()
+    except Exception:
+        pass
+
+    try:
+        Gui.Control.closeDialog()
+    except Exception:
+        pass
+
+    try:
+        QtWidgets.QApplication.processEvents()
+    except Exception:
+        pass
+
+    _clear_selection_safe()
+    QtCore.QTimer.singleShot(0, _clear_selection_safe)
+    QtCore.QTimer.singleShot(60, _finish_forced_cancel)
+
+    if log and console and hasattr(console, "history"):
+        parts = []
+        if had_handlers:
+            parts.append("/".join(had_handlers))
+        if had_draft_command or had_dialog:
+            parts.append("Draft command")
+        if had_selection_box or had_selection or had_grips:
+            parts.append("selection")
+        if parts:
+            console.history.append(
+                f"<span style='color:#aaa;'>Cancel: cleared {' and '.join(parts)}.</span>"
+            )
+
+    return True
 
 
 def _suspend_auto_grips(seconds=2.0):
@@ -21,7 +245,7 @@ def _has_active_draft_command():
         if 'Edit' not in cls:
             return True
     blocker = getattr(Gui, 'ccad_auto_blocker', None)
-    if blocker and time.time() - blocker._last_cmd_time < 1.0:
+    if blocker and time.time() - blocker._last_cmd_time < 0.25:
         return True
     return False
 
@@ -77,6 +301,7 @@ class SelectionBox(QtWidgets.QWidget):
     def __init__(self, target_viewport):
         super().__init__(target_viewport)
         self.viewport = target_viewport
+        self.setObjectName("ClassicCADSelectionBox")
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
@@ -87,6 +312,44 @@ class SelectionBox(QtWidgets.QWidget):
         self.preview_rects = []
         self.resize(self.viewport.size())
         self.hide()
+
+
+def _dispose_selection_logic(logic):
+    if not logic:
+        return
+
+    try:
+        logic.cancel_box()
+    except Exception:
+        pass
+
+    try:
+        logic.remove_callbacks()
+    except Exception:
+        pass
+
+    try:
+        if hasattr(logic, "viewport") and logic.viewport:
+            logic.viewport.removeEventFilter(logic)
+    except Exception:
+        pass
+
+    box = getattr(logic, "box", None)
+    if box is not None:
+        try:
+            box.is_active = False
+            box.preview_rects = []
+            box.hide()
+            box.close()
+            box.setParent(None)
+            box.deleteLater()
+        except Exception:
+            pass
+
+    try:
+        logic.deleteLater()
+    except Exception:
+        pass
 
     def paintEvent(self, event):
         if not self.is_active or not self.start_pos or not self.current_pos:
@@ -411,6 +674,13 @@ class CCADSelectionLogic(QtCore.QObject):
             if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
                 return
             if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
+                return
+            if hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler:
+                return
+            if hasattr(Gui, 'ccad_stretch_handler') and Gui.ccad_stretch_handler:
+                return
+            hatch = getattr(Gui, 'ccad_hatch_handler', None)
+            if hatch and getattr(hatch, 'mode', '') == 'point':
                 return
             if _has_active_draft_command():
                 return
@@ -886,7 +1156,7 @@ class AutoSelectionBlocker:
         try:
             name = obj.Name
             self.recent_objects.add(name)
-            QtCore.QTimer.singleShot(200, lambda n=name: self.recent_objects.discard(n))
+            QtCore.QTimer.singleShot(100, lambda n=name: self.recent_objects.discard(n))
             QtCore.QTimer.singleShot(50, lambda n=name: self._convert_rect_to_wire(n))
         except Exception:
             pass
@@ -936,6 +1206,14 @@ class AutoSelectionBlocker:
                     wire.ViewObject.LineWidth = lw
             
             doc.recompute()
+            if wire and getattr(wire, 'Name', None):
+                self.recent_objects.add(wire.Name)
+                QtCore.QTimer.singleShot(150, lambda n=wire.Name: self.recent_objects.discard(n))
+                for delay in (0, 40, 120):
+                    QtCore.QTimer.singleShot(
+                        delay,
+                        lambda d=doc.Name, n=wire.Name: self._safe_remove(d, n)
+                    )
         except Exception:
             pass
 
@@ -950,7 +1228,7 @@ class AutoSelectionBlocker:
                 return False
             self._last_cmd_time = time.time()
             return True
-        if time.time() - self._last_cmd_time < 1.0:
+        if time.time() - self._last_cmd_time < 0.25:
             return True
         return False
 
@@ -996,7 +1274,10 @@ class AutoSelectionBlocker:
                 return
             editable = [o for o in sel if hasattr(o, 'Shape') and not o.Shape.isNull()]
             # Skip XLine objects — own Coin markers handle their grips
-            editable = [o for o in editable if not ccad_cmd_xline.is_xline(o)]
+            editable = [
+                o for o in editable
+                if not ccad_cmd_xline.is_xline(o) and not _is_hatch_like_object(o)
+            ]
             if not editable:
                 return
             doc = App.ActiveDocument
@@ -1137,17 +1418,7 @@ class AdditiveSelectionFilter(QtCore.QObject):
                 _close_dialog_safe()
 
     def handle_full_escape(self):
-        if self._escaping:
-            return
-        self.previous_selection = []
-        self._escaping = True
-        blocker = getattr(Gui, 'ccad_auto_blocker', None)
-        if blocker:
-            blocker._opening_grips = True
-            blocker._gripped_objects = []
-        _close_dialog_safe()
-        Gui.Selection.clearSelection()
-        QtCore.QTimer.singleShot(100, self._finish_escape)
+        force_cancel_interaction(console=getattr(Gui, 'classic_console', None), clear_console_input=True)
 
     def _finish_escape(self):
         try:
@@ -1163,38 +1434,18 @@ class AdditiveSelectionFilter(QtCore.QObject):
         if not self.active or self._escaping:
             return False
 
-        if event.type() == QtCore.QEvent.Type.KeyPress and event.key() == QtCore.Qt.Key_Escape:
-            # Console text editing takes priority
-            console = getattr(Gui, 'classic_console', None)
-            if console and console.input.hasFocus() and console.input.text():
-                return False
-            # Cancel selection box
-            sel_logic = getattr(Gui, 'ccad_sel_logic', None)
-            if sel_logic:
-                sel_logic.cancel_box()
-
-            for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler'):
-                handler = getattr(Gui, attr, None)
-                if handler:
-                    cleanup = getattr(handler, '_cleanup', None)
-                    if not callable(cleanup):
-                        cleanup = getattr(handler, 'cleanup', None)
-                    if callable(cleanup):
-                        try:
-                            cleanup(cancelled=True)
-                        except TypeError:
-                            cleanup()
-                    return True
-
-            # If a non-Edit Draft command is running, let FreeCAD handle ESC
-            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
-                cls = App.activeDraftCommand.__class__.__name__ or ''
-                if 'Edit' not in cls:
-                    self.previous_selection = []
-                    return False
-            # Full escape (Edit grips or idle)
-            self.handle_full_escape()
-            return True
+        if (
+            event.type() in (QtCore.QEvent.Type.ShortcutOverride, QtCore.QEvent.Type.KeyPress)
+            and event.key() == QtCore.Qt.Key_Escape
+        ):
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return force_cancel_interaction(
+                console=getattr(Gui, 'classic_console', None),
+                clear_console_input=True,
+            )
 
         if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
             return False
@@ -1203,6 +1454,11 @@ class AdditiveSelectionFilter(QtCore.QObject):
         if hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler:
             return False
         if hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler:
+            return False
+        if hasattr(Gui, 'ccad_stretch_handler') and Gui.ccad_stretch_handler:
+            return False
+        hatch_handler = getattr(Gui, 'ccad_hatch_handler', None)
+        if hatch_handler and getattr(hatch_handler, 'mode', '') == 'point':
             return False
 
         try:
@@ -1388,9 +1644,9 @@ def setup():
 
     if hasattr(Gui, "ccad_sel_logic"):
         try:
-            Gui.ccad_sel_logic.viewport.removeEventFilter(Gui.ccad_sel_logic)
-            Gui.ccad_sel_logic.deleteLater()
-        except: pass
+            _dispose_selection_logic(Gui.ccad_sel_logic)
+        except Exception:
+            pass
         del Gui.ccad_sel_logic
     
     if hasattr(Gui, "ccad_auto_blocker"):
@@ -1438,18 +1694,7 @@ def _attach_viewport(mw, retries=0):
             pass
 
         if current:
-            try:
-                current.remove_callbacks()
-            except Exception:
-                pass
-            try:
-                current.viewport.removeEventFilter(current)
-            except Exception:
-                pass
-            try:
-                current.deleteLater()
-            except Exception:
-                pass
+            _dispose_selection_logic(current)
             if hasattr(Gui, "ccad_sel_logic"):
                 del Gui.ccad_sel_logic
 
@@ -1461,17 +1706,9 @@ def _attach_viewport(mw, retries=0):
 def tear_down():
     if hasattr(Gui, "ccad_sel_logic"):
         try:
-            try:
-                Gui.ccad_sel_logic.remove_callbacks()
-            except Exception:
-                pass
-            try:
-                Gui.ccad_sel_logic.viewport.removeEventFilter(Gui.ccad_sel_logic)
-            except Exception:
-                pass
-            Gui.ccad_sel_logic.deleteLater()
+            _dispose_selection_logic(Gui.ccad_sel_logic)
             del Gui.ccad_sel_logic
-        except:
+        except Exception:
             pass
 
     if hasattr(Gui, "ccad_pickadd_filter"):

@@ -23,6 +23,7 @@ except Exception:
 
 MODULES = [
     "ccad_console",
+    "ccad_cmd_hatch",
     "ccad_cursor",
     "ccad_selection",
     "ccad_draft_tools",
@@ -35,6 +36,7 @@ COMMAND_MODULES = [
     "ccad_cmd_copy",
     "ccad_cmd_fillet",
     "ccad_cmd_join",
+    "ccad_cmd_mirror",
     "ccad_cmd_spline",
     "ccad_cmd_stretch",
     "ccad_cmd_trim",
@@ -120,6 +122,39 @@ def _remove_event_filter(obj):
         pass
 
 
+def _dispose_overlay_widget(widget):
+    if widget is None:
+        return
+    try:
+        if hasattr(widget, "is_active"):
+            widget.is_active = False
+        if hasattr(widget, "preview_rects"):
+            widget.preview_rects = []
+        if hasattr(widget, "hide"):
+            widget.hide()
+        if hasattr(widget, "close"):
+            widget.close()
+        if hasattr(widget, "setParent"):
+            widget.setParent(None)
+        if hasattr(widget, "deleteLater"):
+            widget.deleteLater()
+    except Exception:
+        pass
+
+
+def _cleanup_orphan_selection_boxes():
+    if QtWidgets is None:
+        return
+    try:
+        mw = Gui.getMainWindow()
+        if not mw:
+            return
+        for widget in mw.findChildren(QtWidgets.QWidget, "ClassicCADSelectionBox"):
+            _dispose_overlay_widget(widget)
+    except Exception:
+        pass
+
+
 def _cleanup_console():
     if QtWidgets is None:
         return
@@ -187,12 +222,18 @@ def _cleanup_selection():
 
     sel = getattr(Gui, "ccad_sel_logic", None)
     try:
+        if sel and hasattr(sel, "cancel_box"):
+            sel.cancel_box()
+    except Exception:
+        pass
+    try:
         if sel and hasattr(sel, "viewport") and sel.viewport:
             sel.viewport.removeEventFilter(sel)
     except Exception:
         pass
-    _safe_delete_qobject(getattr(sel, "box", None))
+    _dispose_overlay_widget(getattr(sel, "box", None))
     _safe_delete_qobject(sel)
+    _cleanup_orphan_selection_boxes()
     for name in (
         "ccad_sel_logic",
         "ccad_pickadd_filter",
@@ -275,6 +316,8 @@ def _cleanup_misc_handlers():
         "ccad_fillet_handler",
         "ccad_spline_handler",
         "ccad_stretch_handler",
+        "ccad_hatch_handler",
+        "ccad_mirror_session",
     ):
         obj = getattr(Gui, name, None)
         _safe_delete_qobject(obj)
