@@ -1151,25 +1151,49 @@ class AutoSelectionBlocker:
         self._gripped_objects = []
         self._last_cmd_time = 0
         self._suppress_until = 0.0
+        self._pending_rect_checks = {}
+        self._rect_probe_scheduled = False
+
+    def _looks_like_rectangle(self, obj):
+        proxy = getattr(obj, 'Proxy', None)
+        proxy_name = getattr(getattr(proxy, '__class__', None), '__name__', '')
+        if proxy_name == 'Rectangle' or getattr(proxy, 'Type', '') == 'Rectangle':
+            return True
+        return all(hasattr(obj, attr) for attr in ('Length', 'Height', 'Placement'))
+
+    def _queue_rect_check(self, obj_name, attempt=0):
+        self._pending_rect_checks[obj_name] = attempt
+        if self._rect_probe_scheduled:
+            return
+        self._rect_probe_scheduled = True
+        QtCore.QTimer.singleShot(80, self._flush_pending_rect_checks)
+
+    def _flush_pending_rect_checks(self):
+        self._rect_probe_scheduled = False
+        pending = dict(self._pending_rect_checks)
+        self._pending_rect_checks.clear()
+        for obj_name, attempt in pending.items():
+            converted = self._convert_rect_to_wire(obj_name)
+            if not converted and attempt < 1:
+                self._queue_rect_check(obj_name, attempt + 1)
 
     def slotCreatedObject(self, obj):
         try:
             name = obj.Name
             self.recent_objects.add(name)
             QtCore.QTimer.singleShot(100, lambda n=name: self.recent_objects.discard(n))
-            QtCore.QTimer.singleShot(50, lambda n=name: self._convert_rect_to_wire(n))
+            self._queue_rect_check(name)
         except Exception:
             pass
 
     def _convert_rect_to_wire(self, obj_name):
         try:
             doc = App.ActiveDocument
-            if not doc: return
+            if not doc:
+                return False
             obj = doc.getObject(obj_name)
-            if not obj or not hasattr(obj, 'Proxy'):
-                return
-            if obj.Proxy.__class__.__name__ != 'Rectangle':
-                return
+            if not obj or not self._looks_like_rectangle(obj):
+                return False
             
             import Draft, ccad_layers
             p = obj.Placement
@@ -1214,8 +1238,9 @@ class AutoSelectionBlocker:
                         delay,
                         lambda d=doc.Name, n=wire.Name: self._safe_remove(d, n)
                     )
+            return bool(wire and getattr(wire, 'Name', None))
         except Exception:
-            pass
+            return False
 
     def _draft_command_active(self):
         """True if a Draft drawing command (not Draft_Edit) is running."""
@@ -1306,7 +1331,8 @@ class SelectionManager:
         try:
             view = Gui.activeView()
             if not view: return
-            target_radius = 10 
+            target_radius = 10
+            target_color = 4294967040
             param = App.ParamGet("User parameter:BaseApp/Preferences/View")
             if param.GetInt("PickSize") != target_radius:
                 param.SetInt("PickSize", target_radius)
@@ -1314,10 +1340,13 @@ class SelectionManager:
             viewer = view.getViewer()
             if hasattr(viewer, "setPickRadius"):
                 viewer.setPickRadius(float(target_radius))
-            
-            param.SetBool("EnablePreselection", True)
-            param.SetUnsigned("PreselectionColor", 4294967040)
-        except: pass
+
+            if not param.GetBool("EnablePreselection"):
+                param.SetBool("EnablePreselection", True)
+            if param.GetUnsigned("PreselectionColor") != target_color:
+                param.SetUnsigned("PreselectionColor", target_color)
+        except Exception:
+            pass
 
     @staticmethod
     def restore_pick_radius():
@@ -1346,13 +1375,31 @@ class SelectionManager:
 class SelectionObserver(QtCore.QObject):
     def __init__(self):
         super().__init__()
+        self._last_pick_refresh = 0.0
+        self._last_attach_refresh = 0.0
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(250)
 
     def refresh(self):
-        SelectionManager.force_pick_radius()
-        _keep_edit_tools_enabled()
+        now = time.time()
+
+        if now - self._last_pick_refresh >= 1.0:
+            SelectionManager.force_pick_radius()
+            self._last_pick_refresh = now
+
+        cmd = getattr(App, 'activeDraftCommand', None)
+        cls_name = cmd.__class__.__name__ if cmd else ''
+        if 'Edit' in cls_name:
+            _keep_edit_tools_enabled()
+
+        if _has_active_draft_command():
+            return
+
+        if now - self._last_attach_refresh < 0.5:
+            return
+
+        self._last_attach_refresh = now
         try:
             mw = Gui.getMainWindow()
             if mw:
