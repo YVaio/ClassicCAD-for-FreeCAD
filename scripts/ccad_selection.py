@@ -13,6 +13,9 @@ _HANDLER_SPECS = (
     ("ccad_spline_handler", "SPLINE"),
     ("ccad_stretch_handler", "STRETCH"),
     ("ccad_hatch_handler", "HATCH"),
+    ("ccad_layoff_handler", "LAYOFF"),
+    ("ccad_matchprop_handler", "MATCHPROP"),
+    ("ccad_chamfer_handler", "CHAMFER"),
 )
 
 
@@ -294,26 +297,6 @@ def _keep_edit_tools_enabled():
         pass
 
 
-# =========================================================
-# SELECTION BOX WIDGET
-# =========================================================
-class SelectionBox(QtWidgets.QWidget):
-    def __init__(self, target_viewport):
-        super().__init__(target_viewport)
-        self.viewport = target_viewport
-        self.setObjectName("ClassicCADSelectionBox")
-        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
-        self.setStyleSheet('background: transparent;')
-        self.start_pos = None
-        self.current_pos = None
-        self.is_active = False
-        self.preview_rects = []
-        self.resize(self.viewport.size())
-        self.hide()
-
-
 def _dispose_selection_logic(logic):
     if not logic:
         return
@@ -334,44 +317,10 @@ def _dispose_selection_logic(logic):
     except Exception:
         pass
 
-    box = getattr(logic, "box", None)
-    if box is not None:
-        try:
-            box.is_active = False
-            box.preview_rects = []
-            box.hide()
-            box.close()
-            box.setParent(None)
-            box.deleteLater()
-        except Exception:
-            pass
-
     try:
         logic.deleteLater()
     except Exception:
         pass
-
-    def paintEvent(self, event):
-        if not self.is_active or not self.start_pos or not self.current_pos:
-            return
-
-        painter = QtGui.QPainter(self)
-        rect = QtCore.QRect(self.start_pos, self.current_pos).normalized()
-        crossing = self.current_pos.x() < self.start_pos.x()
-
-        if crossing:
-            painter.setBrush(QtGui.QColor(0, 255, 0, 60))
-            painter.setPen(QtGui.QPen(QtCore.Qt.white, 1, QtCore.Qt.DashLine))
-        else:
-            painter.setBrush(QtGui.QColor(0, 100, 255, 60))
-            painter.setPen(QtGui.QPen(QtCore.Qt.white, 1, QtCore.Qt.SolidLine))
-        painter.drawRect(rect)
-
-        if self.preview_rects:
-            painter.setBrush(QtCore.Qt.NoBrush)
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 120), 1, QtCore.Qt.DotLine))
-            for prect in self.preview_rects:
-                painter.drawRect(prect)
 
 
 # =========================================================
@@ -386,20 +335,27 @@ class CCADSelectionLogic(QtCore.QObject):
         super().__init__(viewport)
         self.viewport = viewport
         self.state = 0
+        self.start_pos = None
+        self.current_pos = None
         self.raw_start = None
         self.raw_current = None
+        self._preview_names = []
         self._mouse_cb = None
         self._move_cb = None
         self._view = None
         self._suppress_qt_until = 0.0
         self._allow_native_event_until = 0.0
+        self._sending_native_event = False
         self._native_box_active = False
-        self.box = SelectionBox(viewport)
+        self._native_box_via_command = False
         try:
             self.viewport.installEventFilter(self)
         except Exception:
             pass
         self._install_callbacks()
+
+    def _clear_native_command_tracking(self):
+        self._native_box_via_command = False
 
     def _install_callbacks(self):
         try:
@@ -466,8 +422,66 @@ class CCADSelectionLogic(QtCore.QObject):
         except Exception:
             return None
 
+    def _start_native_box_mode(self, qpos):
+        self._clear_native_command_tracking()
+        viewer = self._get_viewer()
+        if viewer:
+            try:
+                if hasattr(viewer, 'isSelecting') and viewer.isSelecting():
+                    if hasattr(viewer, 'abortSelection'):
+                        viewer.abortSelection()
+                    elif hasattr(viewer, 'stopSelection'):
+                        viewer.stopSelection()
+            except Exception:
+                pass
+
+            try:
+                selection_mode = getattr(viewer, 'Rubberband', 2)
+                viewer.startSelection(selection_mode)
+                self._native_box_active = True
+                return self._send_native_selection_event('down', qpos)
+            except Exception:
+                self._native_box_active = False
+
+        try:
+            Gui.runCommand('Std_BoxSelection', 0)
+            self._native_box_active = True
+            self._native_box_via_command = True
+        except Exception:
+            self._native_box_active = False
+            self._clear_native_command_tracking()
+            return False
+
+        return self._send_native_selection_event('down', qpos)
+
+    def _send_native_escape_event(self):
+        try:
+            from pivy import coin
+
+            ev = coin.SoKeyboardEvent()
+            ev.setKey(coin.SoKeyboardEvent.ESCAPE)
+            ev.setState(coin.SoButtonEvent.UP)
+            if self._dispatch_coin_event(ev):
+                return True
+        except Exception:
+            pass
+
+        try:
+            ev = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier)
+            self._sending_native_event = True
+            try:
+                QtWidgets.QApplication.sendEvent(self.viewport, ev)
+            finally:
+                self._sending_native_event = False
+            return True
+        except Exception:
+            self._sending_native_event = False
+            return False
+
     def _stop_native_box_mode(self, abort=False):
+        via_command = self._native_box_via_command
         self._native_box_active = False
+        self._clear_native_command_tracking()
         try:
             viewer = self._get_viewer()
             if viewer:
@@ -481,15 +495,19 @@ class CCADSelectionLogic(QtCore.QObject):
         except Exception:
             pass
 
+        if abort and via_command:
+            try:
+                self._send_native_escape_event()
+            except Exception:
+                pass
+
     def cancel_box(self):
         self.state = 0
+        self.start_pos = None
+        self.current_pos = None
         self.raw_start = None
         self.raw_current = None
-        self.box.start_pos = None
-        self.box.current_pos = None
-        self.box.preview_rects = []
-        self.box.is_active = False
-        self.box.hide()
+        self._preview_names = []
         self._stop_native_box_mode(abort=True)
 
     def _send_native_mouse_event(self, event_type, qpos, buttons):
@@ -507,9 +525,14 @@ class CCADSelectionLogic(QtCore.QObject):
                 QtCore.Qt.NoModifier,
             )
             self._allow_native_event_until = time.time() + 0.35
-            QtWidgets.QApplication.sendEvent(self.viewport, ev)
+            self._sending_native_event = True
+            try:
+                QtWidgets.QApplication.sendEvent(self.viewport, ev)
+            finally:
+                self._sending_native_event = False
             return True
         except Exception:
+            self._sending_native_event = False
             return False
 
     def _dispatch_coin_event(self, event):
@@ -523,9 +546,14 @@ class CCADSelectionLogic(QtCore.QObject):
             mgr = viewer.getSoEventManager() if hasattr(viewer, 'getSoEventManager') else None
             if mgr and hasattr(mgr, 'processEvent'):
                 self._allow_native_event_until = time.time() + 0.35
-                mgr.processEvent(event)
+                self._sending_native_event = True
+                try:
+                    mgr.processEvent(event)
+                finally:
+                    self._sending_native_event = False
                 return True
         except Exception:
+            self._sending_native_event = False
             pass
 
         return False
@@ -611,23 +639,16 @@ class CCADSelectionLogic(QtCore.QObject):
 
     def _start_box(self, start_pos):
         qpos = self._as_qpoint(start_pos)
+        self.start_pos = QtCore.QPoint(qpos)
+        self.current_pos = QtCore.QPoint(qpos)
         self.raw_start = self._qpoint_to_raw(qpos)
         self.raw_current = self.raw_start
-        self.box.start_pos = QtCore.QPoint(qpos)
-        self.box.current_pos = QtCore.QPoint(qpos)
-        self.box.preview_rects = []
-        self.box.is_active = True
-        self.box.resize(self.viewport.size())
-        if not self.box.isVisible():
-            self.box.show()
-        self.box.raise_()
         try:
             cursor = getattr(Gui, 'ccad_cursor', None)
             if cursor:
                 cursor.lower()
         except Exception:
             pass
-        self.box.update()
         self.state = 1
 
         try:
@@ -640,35 +661,52 @@ class CCADSelectionLogic(QtCore.QObject):
         except Exception:
             pass
 
+        started = self._start_native_box_mode(qpos)
+        if not started:
+            self.state = 0
+            self.start_pos = None
+            self.current_pos = None
+            self.raw_start = None
+            self.raw_current = None
+            self._preview_names = []
+            return
+
     def _update_box(self, current_pos):
         qpos = self._as_qpoint(current_pos)
+        self.current_pos = QtCore.QPoint(qpos)
         self.raw_current = self._qpoint_to_raw(qpos)
-        self.box.current_pos = QtCore.QPoint(qpos)
-        self.box.is_active = True
-        self.box.resize(self.viewport.size())
-        if not self.box.isVisible():
-            self.box.show()
-        self.box.raise_()
         try:
             cursor = getattr(Gui, 'ccad_cursor', None)
             if cursor:
                 cursor.lower()
         except Exception:
             pass
-        self._update_preview()
 
     def _finish_box(self, end_pos):
         qpos = self._as_qpoint(end_pos)
         self._update_box(qpos)
+
+        if self._native_box_active:
+            try:
+                self._send_native_selection_event('up', qpos)
+            except Exception:
+                pass
+
+        self._suppress_qt_until = time.time() + 0.08
+        # Stop native rubber-band visuals first, then override with our
+        # custom window/crossing semantics (always, not only as fallback).
+        self._stop_native_box_mode(abort=False)
         self._perform_selection()
-        self.box.is_active = False
-        self.box.hide()
-        self._suppress_qt_until = time.time() + 0.60
-        self._stop_native_box_mode(abort=True)
+
         self.state = 0
+        self.start_pos = None
+        self.current_pos = None
+        self._preview_names = []
 
     def _coin_mouse(self, info):
         try:
+            if self._sending_native_event:
+                return
             if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
                 return
             if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
@@ -682,6 +720,12 @@ class CCADSelectionLogic(QtCore.QObject):
             hatch = getattr(Gui, 'ccad_hatch_handler', None)
             if hatch and getattr(hatch, 'mode', '') == 'point':
                 return
+            if hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler:
+                return
+            if hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler:
+                return
+            if hasattr(Gui, 'ccad_chamfer_handler') and Gui.ccad_chamfer_handler:
+                return
             if _has_active_draft_command():
                 return
 
@@ -694,28 +738,36 @@ class CCADSelectionLogic(QtCore.QObject):
 
             is_left = "BUTTON1" in button or "LEFT" in button
             is_right = "BUTTON2" in button or "RIGHT" in button
+            is_middle = "BUTTON3" in button or "MIDDLE" in button
 
-            if is_right and state == "DOWN":
+            if (is_right or is_middle) and state == "DOWN":
                 if self.state == 1:
                     self.cancel_box()
                 return
 
-            if not is_left or state != "UP":
+            if not is_left:
+                return
+
+            if state == "DOWN":
+                if self.state == 1:
+                    return
+                if self._current_preselection_name():
+                    return
+                self._start_box(pos)
+                return
+
+            if state != "UP":
                 return
 
             if self.state == 1:
                 self._finish_box(pos)
-                return
-
-            if self._current_preselection_name():
-                return
-
-            self._start_box(pos)
         except Exception as exc:
             App.Console.PrintWarning("ClassicCAD: selection mouse callback warning: %s\n" % exc)
 
     def _coin_move(self, info):
         try:
+            if self._sending_native_event:
+                return
             if self.state != 1:
                 return
             pos = info.get("Position", None)
@@ -723,8 +775,6 @@ class CCADSelectionLogic(QtCore.QObject):
                 return
             self._update_box(pos)
 
-            # Keep FreeCAD's native rubber-band rectangle visually updated
-            # while the first-to-second click selection is active.
             if self._native_box_active:
                 qpos = self._as_qpoint(pos)
                 self._send_native_selection_event('move', qpos)
@@ -993,55 +1043,24 @@ class CCADSelectionLogic(QtCore.QObject):
         return names, preview_rects
 
     def _update_preview(self):
-        doc = App.ActiveDocument
-        if not doc or not self.box.start_pos or not self.box.current_pos:
-            self._preview_names = []
-            self.box.preview_rects = []
-            self.box.update()
-            return
+        self._preview_names = []
 
-        qt_rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
-        if qt_rect.width() < 2 and qt_rect.height() < 2:
-            self._preview_names = []
-            self.box.preview_rects = []
-            self.box.update()
-            return
+    def _after_native_selection(self):
+        blocker = getattr(Gui, 'ccad_auto_blocker', None)
+        if blocker:
+            blocker._opening_grips = False
 
-        is_crossing = self.box.current_pos.x() < self.box.start_pos.x()
-        proj = self._get_projection()
-        preview_names = []
-        preview_rects = []
+        try:
+            if hasattr(App, 'activeDraftCommand') and App.activeDraftCommand:
+                Gui.Control.closeDialog()
+        except Exception:
+            pass
 
-        if is_crossing:
-            label_map = {}
-            try:
-                for obj in doc.Objects:
-                    label_map[obj.Label] = obj.Name
-            except Exception:
-                pass
-
-            object_names = self._pick_objects_in_rect(qt_rect)
-            for name in sorted(object_names):
-                real_name = name
-                if not doc.getObject(real_name):
-                    real_name = label_map.get(name, name)
-                obj = doc.getObject(real_name)
-                if not obj:
-                    continue
-                preview_names.append(real_name)
-                try:
-                    if proj is not None:
-                        r = self._object_projected_qrect(obj, proj)
-                        if r is not None:
-                            preview_rects.append(r)
-                except Exception:
-                    pass
-        else:
-            preview_names, preview_rects = self._blue_window_candidate_names(qt_rect, doc, proj)
-
-        self._preview_names = preview_names
-        self.box.preview_rects = preview_rects
-        self.box.update()
+        if blocker:
+            sel = Gui.Selection.getSelection()
+            if sel:
+                blocker._opening_grips = True
+                QtCore.QTimer.singleShot(30, blocker._open_grips)
 
     def _apply_selection_names(self, names, reopen_grips=True):
         doc = App.ActiveDocument
@@ -1103,16 +1122,15 @@ class CCADSelectionLogic(QtCore.QObject):
     def _perform_selection(self):
         view = Gui.activeView()
         doc = App.ActiveDocument
-        if not view or not doc or not self.box.start_pos or not self.box.current_pos:
+        if not view or not doc or not self.start_pos or not self.current_pos:
             return
 
-        # Use the visible Qt/widget rectangle as the single source of truth.
-        qt_rect = QtCore.QRect(self.box.start_pos, self.box.current_pos).normalized()
+        qt_rect = QtCore.QRect(self.start_pos, self.current_pos).normalized()
 
         if qt_rect.width() < 2 and qt_rect.height() < 2:
             return
 
-        is_crossing = self.box.current_pos.x() < self.box.start_pos.x()
+        is_crossing = self.current_pos.x() < self.start_pos.x()
 
         label_map = {}
         try:
@@ -1506,6 +1524,12 @@ class AdditiveSelectionFilter(QtCore.QObject):
             return False
         hatch_handler = getattr(Gui, 'ccad_hatch_handler', None)
         if hatch_handler and getattr(hatch_handler, 'mode', '') == 'point':
+            return False
+        if hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler:
+            return False
+        if hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler:
+            return False
+        if hasattr(Gui, 'ccad_chamfer_handler') and Gui.ccad_chamfer_handler:
             return False
 
         try:

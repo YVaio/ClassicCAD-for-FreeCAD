@@ -10,7 +10,135 @@ import ccad_cmd_copy
 import ccad_cmd_mirror
 import ccad_cmd_stretch
 import ccad_cmd_hatch
+import ccad_cmd_matchprop
+import ccad_cmd_chamfer
 import ccad_selection
+
+try:
+    from shiboken6 import isValid as _qt_is_valid
+except Exception:
+    try:
+        from shiboken2 import isValid as _qt_is_valid
+    except Exception:
+        _qt_is_valid = None
+
+
+def _toggle_osnap(console=None):
+    """Toggle FreeCAD object snapping (OSNAP / F3)."""
+    tool = getattr(Gui, 'ccad_draft_tools', None)
+    if tool and hasattr(tool, 'toggle_osnap'):
+        tool.toggle_osnap()
+        return
+
+    try:
+        param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        cur = param.GetBool("UseSnap", True)
+        param.SetBool("UseSnap", not cur)
+        state = "ON" if not cur else "OFF"
+    except Exception:
+        state = "?"
+    msg = f"OSNAP: {state}"
+    if console and hasattr(console, 'history'):
+        console.history.append(f"<span style='color:#55ff55;'>{msg}</span>")
+        console.history.moveCursor(QtGui.QTextCursor.End)
+    else:
+        App.Console.PrintMessage(msg + "\n")
+
+
+def _toggle_otrack(console=None):
+    """Toggle object snap tracking (OTRACK / F11)."""
+    try:
+        param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        cur = param.GetBool("UseSnap", True)
+        track = param.GetBool("ShowSnapBar", True)
+        param.SetBool("ShowSnapBar", not track)
+        state = "ON" if not track else "OFF"
+    except Exception:
+        state = "?"
+    msg = f"OTRACK: {state}"
+    if console and hasattr(console, 'history'):
+        console.history.append(f"<span style='color:#55ff55;'>{msg}</span>")
+        console.history.moveCursor(QtGui.QTextCursor.End)
+    else:
+        App.Console.PrintMessage(msg + "\n")
+
+
+def _zoom_extents():
+    """Zoom to fit all objects in the active view (ZOOM Extents)."""
+    try:
+        Gui.runCommand('Std_ViewFitAll', 0)
+    except Exception:
+        try:
+            view = Gui.activeView()
+            if view:
+                view.fitAll()
+        except Exception:
+            pass
+
+
+def _is_classiccad_active():
+    try:
+        wb = Gui.activeWorkbench()
+        return bool(wb and wb.__class__.__name__ == "ClassicCADWorkbench")
+    except Exception:
+        return False
+
+
+def _widget_is_alive(widget):
+    if widget is None:
+        return False
+    if _qt_is_valid is not None:
+        try:
+            return bool(_qt_is_valid(widget))
+        except Exception:
+            return False
+    try:
+        widget.objectName()
+        return True
+    except Exception:
+        return False
+
+
+def _iter_task_panel_confirm_widgets(toolbar):
+    if not toolbar:
+        return []
+
+    widgets = []
+    seen = set()
+    for name in ('xValue', 'yValue', 'zValue', 'lengthValue', 'angleValue', 'radiusValue'):
+        widget = getattr(toolbar, name, None)
+        if not _widget_is_alive(widget):
+            continue
+
+        try:
+            children = list(widget.findChildren(QtWidgets.QWidget))
+        except Exception:
+            children = []
+
+        for candidate in [widget] + children:
+            if not _widget_is_alive(candidate) or candidate in seen:
+                continue
+            seen.add(candidate)
+            widgets.append(candidate)
+    return widgets
+
+
+def _remove_task_panel_confirm_filters(console):
+    if not console:
+        return
+
+    toolbar = getattr(Gui, 'draftToolBar', None)
+    key_filter = getattr(console, '_task_panel_key_filter', None)
+    if not toolbar or not key_filter:
+        return
+
+    for widget in _iter_task_panel_confirm_widgets(toolbar):
+        try:
+            if widget.property('_ccadTaskPanelConfirmFilter'):
+                widget.removeEventFilter(key_filter)
+                widget.setProperty('_ccadTaskPanelConfirmFilter', False)
+        except Exception:
+            pass
 
 
 def _handler_active():
@@ -26,6 +154,10 @@ def _handler_active():
     if hasattr(Gui, 'ccad_stretch_handler') and Gui.ccad_stretch_handler:
         return True
     if hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler:
+        return True
+    if hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler:
+        return True
+    if hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler:
         return True
     return False
 
@@ -72,6 +204,7 @@ class _TaskPanelConfirmFilter(QtCore.QObject):
 class ClassicConsole(QtWidgets.QDockWidget):
     def __init__(self, parent_mw):
         super().__init__(parent_mw)
+        self._alive = True
         self.setObjectName("ClassicConsole")
         self.setWindowTitle("COMMAND LINE")
         self.setTitleBarWidget(QtWidgets.QWidget())
@@ -108,11 +241,19 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'DIM': 'DIMENSION',
             'D': 'DIMENSION',
             'LE': 'LEADER',
+            'MA': 'MATCHPROP',
             'G': 'GROUP',
             'U': 'UNDO',
             'R': 'REDO',
             'LO': 'LAYOFF',
             'LN': 'LAYON',
+            'LI': 'LAYISO',
+            'LU': 'LAYUNISO',
+            'OS': 'OSNAP',
+            'OT': 'OTRACK',
+            'Z': 'ZOOM',
+            'ZE': 'ZOOM',
+            'CHA': 'CHAMFER',
             'RR': 'RELOAD',
             'RE': 'REGEN',
             'XL': 'XLINE',
@@ -150,11 +291,18 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'MTEXT': 'Draft_ShapeString',    # Solid 3D κείμενο
             'DIMENSION': 'Draft_Dimension',
             'LEADER': 'Draft_Label',         # Τα labels στο FreeCAD λειτουργούν σαν Leaders
+            'MATCHPROP': 'MATCHPROP_CCAD',
             'GROUP': 'Std_Group',
             'UNDO': 'Std_Undo',
             'REDO': 'Std_Redo',
             'LAYOFF': 'LAYOFF',
             'LAYON': 'LAYON',
+            'LAYISO': 'LAYISO',
+            'LAYUNISO': 'LAYUNISO',
+            'OSNAP': 'OSNAP',
+            'OTRACK': 'OTRACK',
+            'ZOOM': 'ZOOM_CCAD',
+            'CHAMFER': 'CHAMFER_CCAD',
             'RELOAD': 'RELOAD_CCAD',
             'REGEN': 'REGEN_CCAD',
             'XLINE': 'XLINE_CCAD',
@@ -311,6 +459,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
         return True
 
     def _focus_length_input(self):
+        if not self._alive or not _is_classiccad_active():
+            return False
+
         if not self._is_non_edit_command() or self._text_entry_command_active():
             return False
 
@@ -329,23 +480,15 @@ class ClassicConsole(QtWidgets.QDockWidget):
         return self._focus_widget_contents(target)
 
     def _install_task_panel_confirm_filters(self):
+        if not self._alive or not _is_classiccad_active():
+            return False
+
         toolbar = getattr(Gui, 'draftToolBar', None)
         if not toolbar:
             return False
 
         installed = False
-        widgets = []
-        for name in ('xValue', 'yValue', 'zValue', 'lengthValue', 'angleValue', 'radiusValue'):
-            widget = getattr(toolbar, name, None)
-            if not widget:
-                continue
-            widgets.append(widget)
-            try:
-                widgets.extend(widget.findChildren(QtWidgets.QWidget))
-            except Exception:
-                pass
-
-        for widget in widgets:
+        for widget in _iter_task_panel_confirm_widgets(toolbar):
             try:
                 if widget.property('_ccadTaskPanelConfirmFilter'):
                     continue
@@ -357,15 +500,22 @@ class ClassicConsole(QtWidgets.QDockWidget):
         return installed
 
     def _schedule_task_panel_confirm_filters(self, delays=None):
+        if not self._alive:
+            return
         for delay in (delays or (0, 60, 160, 320, 520, 760)):
             QtCore.QTimer.singleShot(delay, self._install_task_panel_confirm_filters)
 
     def _schedule_length_focus(self, delays=None):
+        if not self._alive:
+            return
         self._schedule_task_panel_confirm_filters(delays=delays)
         for delay in (delays or (0, 60, 160, 320, 520, 760)):
             QtCore.QTimer.singleShot(delay, self._focus_length_input)
 
     def _confirm_task_panel_input(self, widget=None):
+        if not self._alive or not _is_classiccad_active():
+            return False
+
         widget = widget or QtWidgets.QApplication.focusWidget()
         target = self._task_panel_input_target(widget)
         if not self._is_non_edit_command() or not (target or self._task_panel_context_active(widget)):
@@ -463,6 +613,14 @@ class ClassicConsole(QtWidgets.QDockWidget):
                 fillet._on_input()
                 return
 
+        # Chamfer handler intercepts when waiting for distance or D input
+        chamfer = getattr(Gui, 'ccad_chamfer_handler', None)
+        if chamfer and hasattr(chamfer, '_on_input'):
+            text = self.input.text().strip().upper()
+            if chamfer._waiting_dist or text == 'D':
+                chamfer._on_input()
+                return
+
         raw_text = self.input.text().strip().upper()
 
         if not raw_text:
@@ -527,6 +685,8 @@ class ClassicConsole(QtWidgets.QDockWidget):
                      'STRETCH_CCAD', 'HATCH_CCAD', 'Draft_Split',
                      'FILLET_CCAD', 'Draft_Rotate', 'Draft_Scale',
                      'MIRROR_CCAD', 'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
+                     'LAYOFF', 'LAYON', 'LAYISO', 'LAYUNISO',
+                     'OSNAP', 'OTRACK', 'ZOOM_CCAD', 'CHAMFER_CCAD', 'MATCHPROP_CCAD',
                      'Std_Redo')
         if freecad_cmd not in _keep_sel:
             self._auto_deselect()
@@ -647,11 +807,43 @@ class ClassicConsole(QtWidgets.QDockWidget):
             return
 
         # ── Layer commands ──
-        if freecad_cmd in ('LAYOFF', 'LAYON'):
+        if freecad_cmd in ('LAYOFF', 'LAYON', 'LAYISO', 'LAYUNISO'):
             if freecad_cmd == 'LAYOFF':
                 ccad_layers.LAYOFF()
-            else:
+            elif freecad_cmd == 'LAYON':
                 ccad_layers.LAYON()
+            elif freecad_cmd == 'LAYISO':
+                ccad_layers.LAYISO()
+            else:
+                ccad_layers.LAYUNISO()
+            return
+
+        # ── OSNAP toggle ──
+        if freecad_cmd == 'OSNAP':
+            _toggle_osnap(self)
+            return
+
+        # ── OTRACK toggle ──
+        if freecad_cmd == 'OTRACK':
+            _toggle_otrack(self)
+            return
+
+        # ── ZOOM (extents) ──
+        if freecad_cmd == 'ZOOM_CCAD':
+            _zoom_extents()
+            return
+
+        # ── CHAMFER ──
+        if freecad_cmd == 'CHAMFER_CCAD':
+            import importlib
+            importlib.reload(ccad_cmd_chamfer)
+            ccad_cmd_chamfer.run(self)
+            return
+
+        if freecad_cmd == 'MATCHPROP_CCAD':
+            import importlib
+            importlib.reload(ccad_cmd_matchprop)
+            ccad_cmd_matchprop.run(self)
             return
 
         # ── EXPLODE ──
@@ -693,7 +885,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
     def _cleanup_handlers(self):
         """Clean up any active interactive handlers."""
-        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler', 'ccad_hatch_handler'):
+        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler', 'ccad_hatch_handler', 'ccad_layoff_handler', 'ccad_matchprop_handler', 'ccad_chamfer_handler'):
             handler = getattr(Gui, attr, None)
             if not handler:
                 continue
@@ -713,6 +905,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ('ccad_spline_handler', 'SPLINE'),
             ('ccad_stretch_handler', 'STRETCH'),
             ('ccad_hatch_handler', 'HATCH'),
+            ('ccad_layoff_handler', 'LAYOFF'),
+            ('ccad_matchprop_handler', 'MATCHPROP'),
+            ('ccad_chamfer_handler', 'CHAMFER'),
         )
         for attr, label in tools:
             handler = getattr(Gui, attr, None)
@@ -904,6 +1099,16 @@ class ClassicConsole(QtWidgets.QDockWidget):
                 return True
 
         if event.type() == QtCore.QEvent.KeyPress:
+            # F3 → OSNAP toggle
+            if event.key() == QtCore.Qt.Key_F3:
+                _toggle_osnap(self)
+                return True
+
+            # F11 → OTRACK toggle
+            if event.key() == QtCore.Qt.Key_F11:
+                _toggle_otrack(self)
+                return True
+
             # Delete key: close grips first so markers are cleaned up
             if event.key() == QtCore.Qt.Key_Delete:
                 self._close_grips()
@@ -960,9 +1165,12 @@ class CCADFocusStealer(QtCore.QObject):
                 trim_active = hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler
                 fillet_active = hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler
                 hatch_active = hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler
+                layoff_active = hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler
+                matchprop_active = hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler
+                chamfer_active = hasattr(Gui, 'ccad_chamfer_handler') and Gui.ccad_chamfer_handler
                 
                 # Αν τρέχουν τα εργαλεία μας, ρίχνουμε το focus βίαια στην κονσόλα!
-                if spline_active or xline_active or trim_active or fillet_active or hatch_active:
+                if spline_active or xline_active or trim_active or fillet_active or hatch_active or layoff_active or matchprop_active or chamfer_active:
                     if hasattr(Gui, "classic_console"):
                         cmd_input = Gui.classic_console.input
                         if QtWidgets.QApplication.focusWidget() != cmd_input:
@@ -1010,7 +1218,10 @@ def setup():
                           (hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler) or \
                           (hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler) or \
                           (hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler) or \
-                          (hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler)
+                          (hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler) or \
+                          (hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler) or \
+                          (hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler) or \
+                          (hasattr(Gui, 'ccad_chamfer_handler') and Gui.ccad_chamfer_handler)
 
         if handler_running and is_letter and char.upper() not in ('X', 'Y', 'Z'):
             if hasattr(Gui, "classic_console"):
@@ -1051,6 +1262,73 @@ def setup():
         s = QtGui.QShortcut(QtGui.QKeySequence(key), mw)
         s.activated.connect(trigger_console_or_confirm)
         Gui.ccad_shortcuts.append(s)
+
+
+def tear_down():
+    """Eagerly remove the console dock and all shortcuts so no UI artefact or
+    key-intercept persists in the new workbench even for one event-loop tick."""
+    mw = Gui.getMainWindow()
+
+    # 1. Disable & detach all shortcuts immediately (deleteLater alone is too late)
+    for s in getattr(Gui, "ccad_shortcuts", []) or []:
+        try:
+            s.setEnabled(False)
+            s.setParent(None)
+            s.deleteLater()
+        except Exception:
+            pass
+    if hasattr(Gui, "ccad_shortcuts"):
+        try:
+            delattr(Gui, "ccad_shortcuts")
+        except Exception:
+            pass
+
+    # 2. Remove event filters so neither the console nor the focus stealer
+    #    intercept events in the next workbench.
+    app = QtWidgets.QApplication.instance()
+    console = getattr(Gui, "classic_console", None)
+    if console is not None:
+        try:
+            console._alive = False
+        except Exception:
+            pass
+        _remove_task_panel_confirm_filters(console)
+
+    for attr in ("classic_console", "ccad_focus_stealer"):
+        obj = getattr(Gui, attr, None)
+        if obj is not None and app is not None:
+            try:
+                app.removeEventFilter(obj)
+            except Exception:
+                pass
+
+    # 3. Remove the dock widget from the main-window layout so the bottom
+    #    panel area is reclaimed immediately (deleteLater defers this).
+    if console is not None and mw is not None:
+        try:
+            mw.removeDockWidget(console)
+        except Exception:
+            pass
+        try:
+            console.deleteLater()
+        except Exception:
+            pass
+        try:
+            delattr(Gui, "classic_console")
+        except Exception:
+            pass
+
+    for attr in ("ccad_focus_stealer",):
+        obj = getattr(Gui, attr, None)
+        if obj is not None:
+            try:
+                obj.deleteLater()
+            except Exception:
+                pass
+            try:
+                delattr(Gui, attr)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     setup()

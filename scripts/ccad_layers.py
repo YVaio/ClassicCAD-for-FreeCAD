@@ -1,6 +1,6 @@
 import FreeCAD as App
 import FreeCADGui as Gui
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 import Draft
 
 
@@ -170,6 +170,465 @@ def assign_to_layer(obj, layer=None):
 
     if obj not in list(getattr(target_layer, "Group", []) or []):
         return _layer_add_object(target_layer, obj)
+    return True
+
+
+def _console_message(text, color="#aaa"):
+    console = getattr(Gui, "classic_console", None)
+    if console and hasattr(console, "history"):
+        console.history.append(f"<span style='color:{color};'>{text}</span>")
+        console.history.moveCursor(QtGui.QTextCursor.End)
+    else:
+        App.Console.PrintMessage(text + "\n")
+
+
+def _console_warning(text):
+    console = getattr(Gui, "classic_console", None)
+    if console and hasattr(console, "history"):
+        console.history.append(f"<span style='color:#ff5555;'>{text}</span>")
+        console.history.moveCursor(QtGui.QTextCursor.End)
+    else:
+        App.Console.PrintWarning(text + "\n")
+
+
+def _screen_pos(event):
+    return event.position().toPoint() if hasattr(event, "position") else event.pos()
+
+
+def _get_viewport():
+    sel_logic = getattr(Gui, 'ccad_sel_logic', None)
+    if sel_logic and getattr(sel_logic, 'viewport', None):
+        return sel_logic.viewport
+
+    mw = Gui.getMainWindow()
+    if mw:
+        for widget in mw.findChildren(QtWidgets.QWidget):
+            try:
+                if "View3DInventor" in widget.metaObject().className() and widget.isVisible():
+                    return widget
+            except Exception:
+                pass
+    return None
+
+
+def _pick_view_object(pos):
+    try:
+        view = Gui.ActiveDocument.ActiveView if Gui.ActiveDocument else Gui.activeView()
+    except Exception:
+        view = None
+    if not view:
+        return None
+
+    try:
+        info = view.getObjectInfo((pos.x(), pos.y()))
+    except Exception:
+        info = None
+    if not isinstance(info, dict):
+        return None
+
+    obj_name = info.get("Object")
+    doc = App.ActiveDocument
+    if not doc or not obj_name:
+        return None
+    try:
+        return doc.getObject(obj_name)
+    except Exception:
+        return None
+
+
+def _layer_is_visible(layer):
+    if not layer:
+        return False
+    try:
+        vobj = getattr(layer, "ViewObject", None)
+        if vobj and hasattr(vobj, "Visibility"):
+            return bool(vobj.Visibility)
+    except Exception:
+        pass
+    try:
+        if hasattr(layer, "Visibility"):
+            return bool(layer.Visibility)
+    except Exception:
+        pass
+    return True
+
+
+def _set_layer_visibility(layer, visible):
+    if not layer:
+        return False
+
+    changed = False
+    bool_visible = bool(visible)
+
+    try:
+        vobj = getattr(layer, "ViewObject", None)
+        if vobj and hasattr(vobj, "Visibility") and bool(vobj.Visibility) != bool_visible:
+            vobj.Visibility = bool_visible
+            changed = True
+    except Exception:
+        pass
+
+    try:
+        if hasattr(layer, "Visibility") and bool(layer.Visibility) != bool_visible:
+            layer.Visibility = bool_visible
+            changed = True
+    except Exception:
+        pass
+
+    return changed
+
+
+def _set_current_layer(layer):
+    if not layer:
+        return False
+
+    doc = getattr(layer, "Document", None) or App.ActiveDocument
+    if not doc:
+        return False
+
+    try:
+        param = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft")
+        param.SetString("CurrentLayer", layer.Name)
+    except Exception:
+        pass
+
+    toolbar = getattr(Gui, 'draftToolBar', None)
+    if toolbar:
+        try:
+            if hasattr(toolbar, 'setAutoGroup'):
+                toolbar.setAutoGroup(layer.Name)
+            elif hasattr(toolbar, 'autogroup'):
+                toolbar.autogroup = layer.Name
+        except Exception:
+            pass
+
+    sync_style_to_active_layer(doc, layer)
+    sync_layer_dropdown_to_selection(doc)
+    return True
+
+
+def _activate_fallback_layer(doc, hidden_layer=None):
+    if not doc:
+        return None
+
+    hidden_name = getattr(hidden_layer, "Name", "") if hidden_layer else ""
+    for candidate in doc.Objects:
+        if not _is_layer_container(candidate):
+            continue
+        if getattr(candidate, "Name", "") == hidden_name:
+            continue
+        if _layer_is_visible(candidate):
+            if _set_current_layer(candidate):
+                return candidate
+
+    ensure_layer_0(doc, force_active=True)
+    fallback = get_active_layer(doc)
+    if fallback and getattr(fallback, "Name", "") != hidden_name:
+        return fallback
+    return None
+
+
+def _hide_layer(layer):
+    if not layer:
+        return False
+
+    doc = getattr(layer, "Document", None) or App.ActiveDocument
+    if not doc:
+        return False
+
+    if not _layer_is_visible(layer):
+        return False
+
+    active_layer = get_active_layer(doc)
+    if active_layer and getattr(active_layer, "Name", "") == getattr(layer, "Name", ""):
+        fallback_layer = _activate_fallback_layer(doc, hidden_layer=layer)
+        if not fallback_layer:
+            _console_warning(f"LAYOFF: Cannot turn off current layer '{layer.Label}'.")
+            return False
+
+    changed = _set_layer_visibility(layer, False)
+    if changed:
+        try:
+            doc.recompute()
+        except Exception:
+            pass
+        sync_layer_dropdown_to_selection(doc)
+    return changed
+
+
+def _finalize_transaction(doc, changed):
+    if not doc:
+        return
+    try:
+        if changed:
+            doc.commitTransaction()
+        elif hasattr(doc, "abortTransaction"):
+            doc.abortTransaction()
+        else:
+            doc.commitTransaction()
+    except Exception:
+        pass
+
+
+def _off_layers_for_objects(objects):
+    doc = App.ActiveDocument
+    if not doc:
+        return False
+
+    layers = []
+    seen = set()
+    for obj in objects or []:
+        if not obj or _is_layer_container(obj):
+            continue
+        layer = get_object_layer(obj)
+        name = getattr(layer, "Name", "") if layer else ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        layers.append(layer)
+
+    if not layers:
+        _console_warning("LAYOFF: No layer-backed object selected.")
+        return False
+
+    changed = False
+    try:
+        doc.openTransaction("Layer Off")
+    except Exception:
+        pass
+
+    try:
+        for layer in layers:
+            if _hide_layer(layer):
+                changed = True
+                _console_message(f"LAYOFF: Layer '{layer.Label}' hidden.", color="#55ff55")
+    finally:
+        _finalize_transaction(doc, changed)
+
+    try:
+        Gui.Selection.clearSelection()
+    except Exception:
+        pass
+    return changed
+
+
+class LayerOffPickHandler(QtCore.QObject):
+    def __init__(self, viewport):
+        super().__init__()
+        self.viewport = viewport
+        Gui.ccad_layoff_handler = self
+        if self.viewport:
+            self.viewport.installEventFilter(self)
+            try:
+                self.viewport.setFocus()
+            except Exception:
+                pass
+        _console_message("LAYOFF: Click an object to turn its layer off, or press Esc.")
+
+    def cleanup(self, cancelled=False):
+        if getattr(self, "viewport", None):
+            try:
+                self.viewport.removeEventFilter(self)
+            except Exception:
+                pass
+        self.viewport = None
+        if getattr(Gui, 'ccad_layoff_handler', None) is self:
+            Gui.ccad_layoff_handler = None
+        if cancelled:
+            _console_message("LAYOFF cancelled.")
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Escape:
+            self.cleanup(cancelled=True)
+            return True
+
+        if event.type() != QtCore.QEvent.MouseButtonPress or event.button() != QtCore.Qt.LeftButton:
+            return False
+
+        target = _pick_view_object(_screen_pos(event))
+        if not target or _is_layer_container(target):
+            return True
+
+        _off_layers_for_objects([target])
+        return True
+
+
+def LAYOFF():
+    doc = App.ActiveDocument
+    if not doc:
+        _console_warning("LAYOFF: No active document.")
+        return False
+
+    try:
+        selected = [obj for obj in Gui.Selection.getSelection() if not _is_layer_container(obj)]
+    except Exception:
+        selected = []
+
+    if selected:
+        return _off_layers_for_objects(selected)
+
+    handler = getattr(Gui, 'ccad_layoff_handler', None)
+    if handler:
+        handler.cleanup(cancelled=True)
+
+    viewport = _get_viewport()
+    if not viewport:
+        _console_warning("LAYOFF: 3D view not available.")
+        return False
+
+    try:
+        Gui.getMainWindow().setFocus()
+    except Exception:
+        pass
+    LayerOffPickHandler(viewport)
+    return True
+
+
+def LAYON():
+    doc = App.ActiveDocument
+    if not doc:
+        _console_warning("LAYON: No active document.")
+        return False
+
+    handler = getattr(Gui, 'ccad_layoff_handler', None)
+    if handler:
+        handler.cleanup(cancelled=True)
+
+    layers = [obj for obj in doc.Objects if _is_layer_container(obj)]
+    if not layers:
+        _console_warning("LAYON: No layers found.")
+        return False
+
+    changed = False
+    try:
+        doc.openTransaction("Layer On")
+    except Exception:
+        pass
+
+    try:
+        for layer in layers:
+            if _set_layer_visibility(layer, True):
+                changed = True
+    finally:
+        _finalize_transaction(doc, changed)
+
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+    active_layer = get_active_layer(doc)
+    if not active_layer or not _layer_is_visible(active_layer):
+        _activate_fallback_layer(doc)
+    else:
+        sync_style_to_active_layer(doc, active_layer)
+        sync_layer_dropdown_to_selection(doc)
+
+    _console_message("LAYON: All layers restored.", color="#55ff55")
+    return True
+
+
+# ──────────────────────────────────────────────────────────
+# LAYISO / LAYUNISO  (AutoCAD layer isolation)
+# ──────────────────────────────────────────────────────────
+
+def LAYISO():
+    """Hide every layer except those containing the selected objects."""
+    doc = App.ActiveDocument
+    if not doc:
+        _console_warning("LAYISO: No active document.")
+        return False
+
+    try:
+        selected = [o for o in Gui.Selection.getSelection() if not _is_layer_container(o)]
+    except Exception:
+        selected = []
+
+    if not selected:
+        _console_warning("LAYISO: Select at least one object first.")
+        return False
+
+    # Collect layers to keep visible
+    keep = set()
+    for obj in selected:
+        layer = get_object_layer(obj)
+        if layer:
+            keep.add(layer.Name)
+
+    if not keep:
+        _console_warning("LAYISO: Selected objects are not on any named layer.")
+        return False
+
+    all_layers = [o for o in doc.Objects if _is_layer_container(o)]
+
+    # Save current visibility state so LAYUNISO can restore it
+    saved = {layer.Name: _layer_is_visible(layer) for layer in all_layers}
+    Gui.ccad_layiso_saved = saved
+
+    changed = False
+    try:
+        doc.openTransaction("Layer Isolate")
+    except Exception:
+        pass
+
+    try:
+        for layer in all_layers:
+            want = layer.Name in keep
+            if _set_layer_visibility(layer, want):
+                changed = True
+    finally:
+        _finalize_transaction(doc, changed)
+
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+    sync_layer_dropdown_to_selection(doc)
+
+    kept_labels = [l.Label for l in all_layers if l.Name in keep]
+    _console_message(
+        "LAYISO: Isolated layer(s): " + ", ".join(kept_labels) + ".",
+        color="#55ff55",
+    )
+    return True
+
+
+def LAYUNISO():
+    """Restore layer visibility saved by the last LAYISO call."""
+    doc = App.ActiveDocument
+    if not doc:
+        _console_warning("LAYUNISO: No active document.")
+        return False
+
+    saved = getattr(Gui, "ccad_layiso_saved", None)
+    if not saved:
+        _console_warning("LAYUNISO: No isolated state to restore (run LAYISO first).")
+        return False
+
+    changed = False
+    try:
+        doc.openTransaction("Layer Unisolate")
+    except Exception:
+        pass
+
+    try:
+        for layer in [o for o in doc.Objects if _is_layer_container(o)]:
+            want = saved.get(layer.Name, True)
+            if _set_layer_visibility(layer, want):
+                changed = True
+    finally:
+        _finalize_transaction(doc, changed)
+
+    Gui.ccad_layiso_saved = None
+
+    try:
+        doc.recompute()
+    except Exception:
+        pass
+
+    sync_layer_dropdown_to_selection(doc)
+    _console_message("LAYUNISO: Layer visibility restored.", color="#55ff55")
     return True
 
 
@@ -835,6 +1294,13 @@ class DocumentObserver:
 
 
 def tear_down():
+    layoff_handler = getattr(Gui, 'ccad_layoff_handler', None)
+    if layoff_handler:
+        try:
+            layoff_handler.cleanup(cancelled=True)
+        except Exception:
+            pass
+
     if hasattr(Gui, "ccad_layer_observer"):
         try:
             App.removeDocumentObserver(Gui.ccad_layer_observer)

@@ -76,6 +76,22 @@ class ClassicCADWorkbench(Workbench):
         return _QtCore
 
     @staticmethod
+    def _repair_stale_classiccad_prefs():
+        """Clear any leaked ClassicCAD-owned global Draft preference.
+
+        `focusOnLength` lives in Draft's global preferences, not in FreeCAD core
+        source files. If ClassicCAD ever exits unexpectedly, this ensures the
+        stale preference is repaired next time the workbench module is loaded.
+        """
+        try:
+            ccad_prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/ClassicCAD")
+            if ccad_prefs.GetBool("OwnsFocusOnLength", False):
+                App.ParamGet("User parameter:BaseApp/Preferences/Mod/Draft").SetBool("focusOnLength", False)
+                ccad_prefs.SetBool("OwnsFocusOnLength", False)
+        except Exception:
+            pass
+
+    @staticmethod
     def _resolved_startup_workbench():
         start = "StartWorkbench"
 
@@ -277,6 +293,7 @@ class ClassicCADWorkbench(Workbench):
 
     def Initialize(self):
         self.__class__._ensure_paths()
+        self.__class__._repair_stale_classiccad_prefs()
         self._init_draft_clone_ui()
 
     def Activated(self):

@@ -34,8 +34,10 @@ MODULES = [
 
 COMMAND_MODULES = [
     "ccad_cmd_copy",
+    "ccad_cmd_chamfer",
     "ccad_cmd_fillet",
     "ccad_cmd_join",
+    "ccad_cmd_matchprop",
     "ccad_cmd_mirror",
     "ccad_cmd_spline",
     "ccad_cmd_stretch",
@@ -91,6 +93,83 @@ def _call_teardown(module):
             )
 
 
+def _force_cancel_draft_interaction():
+    """Cancel any live Draft/task-panel interaction before teardown.
+
+    Without this, an active Draft Line/Wire command can survive the workbench
+    switch and carry ClassicCAD-specific task-panel behavior into the next
+    workbench.
+    """
+    mod = sys.modules.get("ccad_selection")
+    force_cancel = getattr(mod, "force_cancel_interaction", None) if mod else None
+    if callable(force_cancel):
+        try:
+            if force_cancel(
+                console=getattr(Gui, "classic_console", None),
+                clear_console_input=True,
+                log=False,
+            ):
+                return
+        except Exception:
+            pass
+
+    toolbar = getattr(Gui, "draftToolBar", None)
+    if toolbar:
+        escape = getattr(toolbar, "escape", None)
+        finish = getattr(toolbar, "finish", None)
+        if callable(escape):
+            try:
+                escape()
+            except Exception:
+                pass
+        elif callable(finish):
+            try:
+                finish(cont=False)
+            except TypeError:
+                try:
+                    finish(False)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    active_cmd = getattr(App, "activeDraftCommand", None)
+    if active_cmd:
+        finish = getattr(active_cmd, "finish", None)
+        if callable(finish):
+            try:
+                finish(cont=False)
+            except TypeError:
+                try:
+                    finish()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    try:
+        if getattr(Gui, "ActiveDocument", None) and hasattr(Gui.ActiveDocument, "resetEdit"):
+            Gui.ActiveDocument.resetEdit()
+    except Exception:
+        pass
+
+    try:
+        Gui.Control.closeDialog()
+    except Exception:
+        pass
+
+    try:
+        Gui.Selection.clearSelection()
+    except Exception:
+        pass
+
+    if QtWidgets is not None:
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+
 def _safe_delete_qobject(obj):
     if obj is None:
         return
@@ -122,53 +201,40 @@ def _remove_event_filter(obj):
         pass
 
 
-def _dispose_overlay_widget(widget):
-    if widget is None:
-        return
-    try:
-        if hasattr(widget, "is_active"):
-            widget.is_active = False
-        if hasattr(widget, "preview_rects"):
-            widget.preview_rects = []
-        if hasattr(widget, "hide"):
-            widget.hide()
-        if hasattr(widget, "close"):
-            widget.close()
-        if hasattr(widget, "setParent"):
-            widget.setParent(None)
-        if hasattr(widget, "deleteLater"):
-            widget.deleteLater()
-    except Exception:
-        pass
-
-
-def _cleanup_orphan_selection_boxes():
-    if QtWidgets is None:
-        return
-    try:
-        mw = Gui.getMainWindow()
-        if not mw:
-            return
-        for widget in mw.findChildren(QtWidgets.QWidget, "ClassicCADSelectionBox"):
-            _dispose_overlay_widget(widget)
-    except Exception:
-        pass
-
-
 def _cleanup_console():
     if QtWidgets is None:
         return
+    # Disable shortcuts IMMEDIATELY so they cannot fire in the next workbench
+    # even if the QObject's deferred deletion hasn't been processed yet.
+    for shortcut in getattr(Gui, "ccad_shortcuts", []) or []:
+        try:
+            shortcut.setEnabled(False)
+            shortcut.setParent(None)
+        except Exception:
+            pass
+        _safe_delete_qobject(shortcut)
+    if hasattr(Gui, "ccad_shortcuts"):
+        delattr(Gui, "ccad_shortcuts")
+
     _remove_event_filter(getattr(Gui, "classic_console", None))
     _remove_event_filter(getattr(Gui, "ccad_focus_stealer", None))
-    for shortcut in getattr(Gui, "ccad_shortcuts", []) or []:
-        _safe_delete_qobject(shortcut)
+
+    # Remove the dock widget from the main window layout before deletion so
+    # the bottom panel area is reclaimed immediately.
+    console = getattr(Gui, "classic_console", None)
+    if console is not None:
+        try:
+            mw = Gui.getMainWindow()
+            if mw and hasattr(mw, "removeDockWidget"):
+                mw.removeDockWidget(console)
+        except Exception:
+            pass
+
     for name in ("classic_console", "ccad_focus_stealer"):
         obj = getattr(Gui, name, None)
         _safe_delete_qobject(obj)
         if hasattr(Gui, name):
             delattr(Gui, name)
-    if hasattr(Gui, "ccad_shortcuts"):
-        delattr(Gui, "ccad_shortcuts")
 
 
 def _cleanup_cursor():
@@ -231,9 +297,7 @@ def _cleanup_selection():
             sel.viewport.removeEventFilter(sel)
     except Exception:
         pass
-    _dispose_overlay_widget(getattr(sel, "box", None))
     _safe_delete_qobject(sel)
-    _cleanup_orphan_selection_boxes()
     for name in (
         "ccad_sel_logic",
         "ccad_pickadd_filter",
@@ -317,9 +381,20 @@ def _cleanup_misc_handlers():
         "ccad_spline_handler",
         "ccad_stretch_handler",
         "ccad_hatch_handler",
+        "ccad_layoff_handler",
+        "ccad_matchprop_handler",
+        "ccad_chamfer_handler",
         "ccad_mirror_session",
     ):
         obj = getattr(Gui, name, None)
+        cleanup = getattr(obj, "cleanup", None) if obj else None
+        if callable(cleanup):
+            try:
+                cleanup(cancelled=True)
+            except TypeError:
+                cleanup()
+            except Exception:
+                pass
         _safe_delete_qobject(obj)
         if hasattr(Gui, name):
             delattr(Gui, name)
@@ -329,6 +404,15 @@ def _cleanup_misc_handlers():
 
     if hasattr(Gui, "ccad_silent_top_view"):
         delattr(Gui, "ccad_silent_top_view")
+
+    # Persistent state that should not survive workbench switches
+    for attr in ("ccad_layiso_saved", "ccad_fillet_radius",
+                 "ccad_chamfer_d1", "ccad_chamfer_d2"):
+        if hasattr(Gui, attr):
+            try:
+                delattr(Gui, attr)
+            except Exception:
+                pass
 
 
 def _stop_watch_timer():
@@ -440,6 +524,8 @@ def deactivate():
         _stop_watch_timer()
         _purge_classiccad_modules()
         return
+
+    _force_cancel_draft_interaction()
 
     for mod_name in reversed(MODULES):
         module = sys.modules.get(mod_name)
