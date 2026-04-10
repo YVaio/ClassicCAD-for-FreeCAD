@@ -13,6 +13,11 @@ def _is_techdraw_view(obj):
     return bool(obj) and hasattr(obj, "isDerivedFrom") and obj.isDerivedFrom("TechDraw::DrawView")
 
 
+def _is_techdraw_object(obj):
+    type_id = getattr(obj, "TypeId", "")
+    return isinstance(type_id, str) and type_id.startswith("TechDraw::")
+
+
 def _page_from_object(obj):
     if _is_techdraw_page(obj):
         return obj
@@ -96,16 +101,8 @@ def _visible_techdraw_pages(doc):
 
 
 def _resolve_regen_pages(doc):
-    pages = _selected_techdraw_pages()
-    if pages:
-        return pages
-
     pages = _pages_matching_active_window(doc)
     if pages:
-        return pages
-
-    pages = _visible_techdraw_pages(doc)
-    if len(pages) == 1:
         return pages
 
     return []
@@ -114,7 +111,7 @@ def _resolve_regen_pages(doc):
 def _redraw_techdraw_page_if_needed(doc):
     pages = _resolve_regen_pages(doc)
     if not pages:
-        return
+        return False
 
     try:
         Gui.runCommand("TechDraw_RedrawPage", 0)
@@ -123,6 +120,7 @@ def _redraw_techdraw_page_if_needed(doc):
         App.Console.PrintLog(f"REGEN: Redrew TechDraw page: {labels}\n")
     except Exception as exc:
         App.Console.PrintWarning(f"REGEN: TechDraw page redraw skipped: {exc}\n")
+    return True
 
 def REGEN():
     """Εντολή REGEN: Δυναμική εξομάλυνση και επαναϋπολογισμός σύνθετης γεωμετρίας (Splines, Beziers, κλπ)."""
@@ -145,17 +143,26 @@ def REGEN():
         dynamic_deviation = visible_height * 0.001
         if dynamic_deviation < 0.0005: dynamic_deviation = 0.0005
 
+        if _redraw_techdraw_page_if_needed(doc):
+            App.Console.PrintLog(f"REGEN: Done. Active TechDraw page redrawn.\n")
+            return
+
         # Τύποι που αγνοούμε (απλές γραμμές και σημεία) για ταχύτητα
         simple_types = ('Part::Line', 'App::Origin', 'App::Plane')
+        recompute_targets = []
 
         for obj in doc.Objects:
+            if _is_techdraw_object(obj):
+                continue
+
             # 1. Έλεγχος αν το αντικείμενο έχει Shape (άρα είναι γεωμετρία)
             if hasattr(obj, "Shape"):
                 
                 # 2. Αν δεν είναι απλή γραμμή, το μαρκάρουμε για πλήρη αναγέννηση
                 # Αυτό επιβάλλει στις Splines/Beziers να ξαναφτιάξουν το πλέγμα τους
                 if obj.TypeId not in simple_types:
-                    obj.touch() 
+                    obj.touch()
+                    recompute_targets.append(obj)
 
                 # 3. Ρύθμιση Deviation στο ViewObject για οπτική εξομάλυνση
                 if hasattr(obj, 'ViewObject') and obj.ViewObject:
@@ -165,9 +172,9 @@ def REGEN():
                     if hasattr(vo, "AngularDeflection"):
                         vo.AngularDeflection = dynamic_deviation * 10
         
-        # 4. Επαναϋπολογισμός και ανανέωση οθόνης
-        doc.recompute()
-        _redraw_techdraw_page_if_needed(doc)
+        # 4. Επαναϋπολογισμός μόνο των 3D/model objects του ενεργού view.
+        if recompute_targets:
+            doc.recompute(recompute_targets)
         Gui.updateGui()
         App.Console.PrintLog(f"REGEN: Done. Complex geometry smoothed (Deviation: {dynamic_deviation:.4f})\n")
     except Exception as e:
