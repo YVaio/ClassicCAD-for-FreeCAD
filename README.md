@@ -11,7 +11,7 @@ Features a separate "ClassicCAD" workbench.
 I haven't packaged it like a proper addon yet, so you will have to create any necessary folders and throw all the contents inside: C:\Users\username\AppData\Roaming\FreeCAD\v1-1\Mod\ClassicCAD
 ##
 ### COMPATIBILITY
-works with **stable version 1.1**
+works with **stable version 1.1.0**
 ##
 ### UI
 <img width="3839" height="2052" alt="image" src="https://github.com/user-attachments/assets/99c82af7-9733-42d9-9f12-844efc200064" />
