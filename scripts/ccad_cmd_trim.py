@@ -7,6 +7,8 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide6 import QtCore
 
+import ccad_cmd_xline
+
 
 def parse_vector(p):
     if p is None:
@@ -687,8 +689,9 @@ def _wire_breakpoints(doc, target_name, obj, boundaries, path_points, closed, ed
             hits = _collect_target_edge_hits(doc, target_name, f'Edge{idx + 1}', edge, boundaries)
             edge_len = start.distanceToPoint(end)
             for _param, point in hits:
-                t = max(0.0, min(1.0, _line_parameter(start, end, point)))
-                if 1e-6 < t < 1.0 - 1e-6:
+                t = _line_parameter(start, end, point)
+                if -1e-6 <= t <= 1.0 + 1e-6:
+                    t = max(0.0, min(1.0, t))
                     items.append({'s': start_s + edge_len * t, 'point': point, 'stop': True})
 
     if closed:
@@ -724,6 +727,23 @@ def _set_wire_points(obj, world_points):
         obj.MakeFace = False
     obj.Points = local_points
     return True
+
+
+def _demote_xline(obj):
+    if not ccad_cmd_xline.is_xline(obj):
+        return
+    try:
+        if hasattr(obj, 'CCADIsXLine'):
+            obj.CCADIsXLine = False
+    except Exception:
+        pass
+    try:
+        label = str(getattr(obj, 'Label', '') or '')
+        if label.startswith('XLine'):
+            suffix = label[5:].strip()
+            obj.Label = f"Line {suffix}".strip()
+    except Exception:
+        pass
 
 
 def _trim_wire_target(doc, target_name, target_sub, obj, pick_world, boundaries):
@@ -1502,6 +1522,9 @@ class TrimExtendHandler:
                     f"<span style='color:#ff5555;'>{self.mode}: {error}</span>"
                 )
                 return
+
+            if self.mode == 'TRIM':
+                _demote_xline(target)
 
             doc.recompute()
             self._commit_transaction()

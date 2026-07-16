@@ -2,6 +2,8 @@ import FreeCAD as App
 import FreeCADGui as Gui
 from PySide6 import QtWidgets, QtCore, QtGui
 
+import ccad_layers
+
 
 def _find_visible_viewport():
     try:
@@ -272,7 +274,9 @@ def _current_snap_marker(view=None, viewport=None):
     The point is the exact snap marker position computed by FreeCAD's snapper,
     while the built-in orange marker is suppressed by ClassicCAD.
     """
-    if not getattr(App, 'activeDraftCommand', None):
+    xline_handler = getattr(Gui, 'ccad_xline_handler', None)
+    offset_handler = getattr(Gui, 'ccad_offset_handler', None)
+    if not getattr(App, 'activeDraftCommand', None) and not xline_handler and not offset_handler:
         return None
 
     view = view or Gui.activeView()
@@ -280,6 +284,13 @@ def _current_snap_marker(view=None, viewport=None):
     snapper = getattr(Gui, 'Snapper', None)
     mode = getattr(snapper, '_ccad_snap_mode', None) if snapper else None
     point = _coerce_vector(getattr(snapper, '_ccad_snap_point', None)) if snapper else None
+    if (not mode or point is None) and (xline_handler or offset_handler):
+        handler = xline_handler or offset_handler
+        mode = getattr(handler, '_hover_mode', None) or getattr(snapper, 'cursorMode', None)
+        point = _coerce_vector(getattr(handler, '_hover_point', None))
+        if point is not None and not mode:
+            snap_info = getattr(snapper, 'snapInfo', None) if snapper else None
+            mode = 'near' if isinstance(snap_info, dict) and snap_info.get('Object') else None
     if not mode or point is None:
         return None
 
@@ -288,6 +299,8 @@ def _current_snap_marker(view=None, viewport=None):
         return None
 
     resolved_mode = _infer_snap_mode(view, viewport, snapper, point, mode)
+    if (xline_handler or offset_handler) and str(resolved_mode).lower() in ('near', 'passive'):
+        return None
     direction = None
     if str(resolved_mode).lower() == 'tangent':
         direction = _snap_world_direction_to_qvector(
@@ -298,6 +311,104 @@ def _current_snap_marker(view=None, viewport=None):
         )
 
     return (str(resolved_mode).lower(), qpoint, QtGui.QColor(255, 170, 55), direction)
+
+
+def _current_xline_preview(view=None, viewport=None):
+    handler = getattr(Gui, 'ccad_xline_handler', None)
+    if not handler:
+        return None
+
+    segment = getattr(handler, '_preview_segment', None)
+    if not segment or len(segment) < 2:
+        return None
+
+    view = view or Gui.activeView()
+    viewport = viewport or _find_visible_viewport()
+    q1 = _snap_world_to_qpoint(view, viewport, segment[0])
+    q2 = _snap_world_to_qpoint(view, viewport, segment[1])
+    if q1 is None or q2 is None:
+        return None
+    return q1, q2
+
+
+def _current_offset_preview(view=None, viewport=None):
+    handler = getattr(Gui, 'ccad_offset_handler', None)
+    if not handler:
+        return None
+
+    preview = getattr(handler, '_preview_candidate', None)
+    parts = preview.get('parts') if isinstance(preview, dict) else None
+    if not parts:
+        return None
+
+    view = view or Gui.activeView()
+    viewport = viewport or _find_visible_viewport()
+    qparts = []
+    for part in parts:
+        qpart = []
+        for point in part:
+            qpoint = _snap_world_to_qpoint(view, viewport, point)
+            if qpoint is not None:
+                qpart.append(qpoint)
+        if len(qpart) >= 2:
+            qparts.append(qpart)
+    return qparts or None
+
+
+def _draw_style_to_pen_style(value):
+    try:
+        index = int(value)
+    except Exception:
+        index = None
+    if index == 1:
+        return QtCore.Qt.DashLine
+    if index == 2:
+        return QtCore.Qt.DotLine
+    if index == 3:
+        return QtCore.Qt.DashDotLine
+    draw_style = str(value or '').lower()
+    if 'dashdot' in draw_style:
+        return QtCore.Qt.DashDotLine
+    if 'dot' in draw_style:
+        return QtCore.Qt.DotLine
+    if 'dash' in draw_style:
+        return QtCore.Qt.DashLine
+    return QtCore.Qt.SolidLine
+
+
+def _current_xline_preview_pen():
+    color = QtGui.QColor(90, 210, 255, 210)
+    width = 2.0
+    style = QtCore.Qt.DashLine
+
+    try:
+        doc = App.ActiveDocument
+        layer = ccad_layers.get_active_layer(doc) if doc else None
+        vobj = getattr(layer, 'ViewObject', None) if layer else None
+        if vobj:
+            rgb = getattr(vobj, 'LineColor', None)
+            if isinstance(rgb, (tuple, list)) and len(rgb) >= 3:
+                color = QtGui.QColor(
+                    int(round(float(rgb[0]) * 255.0)),
+                    int(round(float(rgb[1]) * 255.0)),
+                    int(round(float(rgb[2]) * 255.0)),
+                    210,
+                )
+            width = max(1.0, float(getattr(vobj, 'LineWidth', width) or width))
+            style = _draw_style_to_pen_style(getattr(vobj, 'DrawStyle', 'Solid'))
+        else:
+            view_param = App.ParamGet('User parameter:BaseApp/Preferences/View')
+            argb = int(view_param.GetUnsigned('DefaultShapeLineColor', 0xFFFFFFFF))
+            width = max(1.0, float(view_param.GetInt('DefaultShapeLineWidth', int(width)) or width))
+            style = _draw_style_to_pen_style(
+                App.ParamGet('User parameter:BaseApp/Preferences/Mod/Draft').GetInt('DefaultDrawStyle', 0)
+            )
+            color = QtGui.QColor.fromRgba(argb)
+            color.setAlpha(210)
+    except Exception:
+        pass
+
+    return QtGui.QPen(color, width, style)
 
 
 def _draw_snap_symbol(painter, mode, center, color, direction=None):
@@ -695,13 +806,19 @@ class ClassicCursor(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
 
         mx, my = self.mouse_pos.x(), self.mouse_pos.y()
-        busy = self.is_busy() or self._is_orbiting_or_panning
+        xline_handler = getattr(Gui, 'ccad_xline_handler', None)
+        offset_handler = getattr(Gui, 'ccad_offset_handler', None)
+        busy = (self.is_busy() and not xline_handler and not offset_handler) or self._is_orbiting_or_panning
         selection_box_active = self._selection_box_active()
         cmd = getattr(App, 'activeDraftCommand', None)
         cls_name = cmd.__class__.__name__ if cmd else ''
 
         cursor_mode = 'normal'
         if getattr(Gui, 'ccad_trim_handler', None) or getattr(Gui, 'ccad_fillet_handler', None) or getattr(Gui, 'ccad_layoff_handler', None) or getattr(Gui, 'ccad_matchprop_handler', None) or getattr(Gui, 'ccad_chamfer_handler', None):
+            cursor_mode = 'pickbox'
+        elif xline_handler:
+            cursor_mode = 'pickbox' if getattr(xline_handler, 'mode', None) in ('H', 'V') else 'cross'
+        elif offset_handler:
             cursor_mode = 'pickbox'
         elif cmd and 'Stretch' in cls_name:
             step = int(getattr(cmd, 'step', 0) or 0)
@@ -737,7 +854,7 @@ class ClassicCursor(QtWidgets.QWidget):
             (mat.A31, -mat.A32, c_z, abs(cam_dir.z)),
         ]
 
-        gap = 0 if busy else 5
+        gap = 0 if busy or (xline_handler and cursor_mode == 'cross') else 5
 
         if cursor_mode != 'pickbox':
             for vx, vy, col, dot in axes_data:
@@ -754,6 +871,26 @@ class ClassicCursor(QtWidgets.QWidget):
         if cursor_mode != 'cross' and (not busy or cursor_mode == 'pickbox'):
             painter.setPen(QtGui.QPen(QtGui.QColor(col_w), 0))
             painter.drawRect(mx - 5, my - 5, 10, 10)
+
+        preview_segment = _current_xline_preview(view=view, viewport=self.viewport)
+        if preview_segment and not selection_box_active and not getattr(xline_handler, '_preview', None):
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(_current_xline_preview_pen())
+            painter.drawLine(preview_segment[0], preview_segment[1])
+            painter.restore()
+
+        offset_preview = _current_offset_preview(view=view, viewport=self.viewport)
+        if offset_preview and not selection_box_active and not getattr(offset_handler, '_preview', None):
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.setPen(_current_xline_preview_pen())
+            for part in offset_preview:
+                if len(part) == 2:
+                    painter.drawLine(part[0], part[1])
+                else:
+                    painter.drawPolyline(QtGui.QPolygon(part))
+            painter.restore()
 
         snap_marker = _current_snap_marker(view=view, viewport=self.viewport)
         if snap_marker and not selection_box_active:

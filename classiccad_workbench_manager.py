@@ -39,6 +39,7 @@ COMMAND_MODULES = [
     "ccad_cmd_join",
     "ccad_cmd_matchprop",
     "ccad_cmd_mirror",
+    "ccad_cmd_offset",
     "ccad_cmd_spline",
     "ccad_cmd_stretch",
     "ccad_cmd_trim",

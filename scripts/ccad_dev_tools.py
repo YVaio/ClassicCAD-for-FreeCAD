@@ -189,6 +189,7 @@ def reload_classic_cad():
     # Η λίστα των modules
     modules_to_reload = [
         "ccad_cmd_xline",
+        "ccad_cmd_offset",
         "ccad_cmd_trim",
         "ccad_cmd_join",
         "ccad_cmd_spline",

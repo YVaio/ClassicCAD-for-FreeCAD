@@ -7,6 +7,8 @@ creates a single Draft Wire, removing the originals.
 import FreeCAD as App
 import FreeCADGui as Gui
 
+import ccad_layers
+
 
 def _collect_points(objects):
     """Return an ordered list of points from lines/wires, chaining endpoints."""
@@ -89,6 +91,11 @@ def run(console):
             return
 
         doc = App.ActiveDocument
+        source_layer = None
+        for obj in sel:
+            source_layer = ccad_layers.get_object_layer(obj)
+            if source_layer:
+                break
         # Capture visual properties from first object
         lc = None
         for obj in sel:
@@ -108,6 +115,11 @@ def run(console):
             points = points[:-1]
 
         wire = Draft.make_wire(points, closed=closed, face=False)
+        if source_layer:
+            try:
+                ccad_layers.assign_to_layer(wire, source_layer)
+            except Exception:
+                pass
         if lc and hasattr(wire, 'ViewObject'):
             wire.ViewObject.LineColor = lc
         doc.recompute()

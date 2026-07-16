@@ -3,6 +3,7 @@ import FreeCADGui as Gui
 from PySide6 import QtWidgets, QtCore, QtGui
 import ccad_layers
 import ccad_cmd_xline
+import ccad_cmd_offset
 import ccad_cmd_trim
 import ccad_cmd_join
 import ccad_cmd_spline
@@ -76,6 +77,102 @@ def _zoom_extents():
             pass
 
 
+def _zoom_selection(console=None):
+    """Zoom to the current selection using FreeCAD's native fit-selection behavior."""
+    try:
+        selection = list(Gui.Selection.getSelection() or [])
+    except Exception:
+        selection = []
+
+    if not selection:
+        msg = 'ZOOM Object: Select object(s) first'
+        if console and hasattr(console, 'history'):
+            console.history.append(f"<span style='color:#ff5555;'>{msg}</span>")
+            console.history.moveCursor(QtGui.QTextCursor.End)
+        else:
+            App.Console.PrintError(msg + "\n")
+        return False
+
+    try:
+        Gui.runCommand('Std_ViewFitSelection', 0)
+        return True
+    except Exception:
+        pass
+
+    try:
+        sender = getattr(Gui, 'SendMsgToActiveView', None)
+        if callable(sender):
+            sender('ViewSelection')
+            return True
+    except Exception:
+        pass
+
+    try:
+        view = Gui.activeView()
+        if view and hasattr(view, 'fitSelection'):
+            view.fitSelection()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _make_block(console=None):
+    """Create a Draft block from the current selection."""
+    try:
+        import Draft
+    except Exception as exc:
+        msg = f"BLOCK: {exc}"
+        if console and hasattr(console, 'history'):
+            console.history.append(f"<span style='color:#ff5555;'>{msg}</span>")
+            console.history.moveCursor(QtGui.QTextCursor.End)
+        else:
+            App.Console.PrintError(msg + "\n")
+        return
+
+    selection = list(Gui.Selection.getSelection() or [])
+    if not selection:
+        msg = 'BLOCK: Select objects first'
+        if console and hasattr(console, 'history'):
+            console.history.append(f"<span style='color:#ff5555;'>{msg}</span>")
+            console.history.moveCursor(QtGui.QTextCursor.End)
+        else:
+            App.Console.PrintError(msg + "\n")
+        return
+
+    doc = App.ActiveDocument
+    transaction_open = False
+    try:
+        if doc and hasattr(doc, 'openTransaction'):
+            doc.openTransaction('ClassicCAD Block')
+            transaction_open = True
+        block = Draft.make_block(selection)
+        if block is None:
+            raise RuntimeError('Draft.make_block returned no object')
+        if doc and hasattr(doc, 'recompute'):
+            doc.recompute()
+        if transaction_open and hasattr(doc, 'commitTransaction'):
+            doc.commitTransaction()
+        msg = f"BLOCK: Created {getattr(block, 'Label', None) or getattr(block, 'Name', None) or 'block'}"
+        if console and hasattr(console, 'history'):
+            console.history.append(f"<span style='color:#55ff55;'>{msg}</span>")
+            console.history.moveCursor(QtGui.QTextCursor.End)
+        else:
+            App.Console.PrintMessage(msg + "\n")
+    except Exception as exc:
+        if transaction_open and doc and hasattr(doc, 'abortTransaction'):
+            try:
+                doc.abortTransaction()
+            except Exception:
+                pass
+        msg = f"BLOCK: {exc}"
+        if console and hasattr(console, 'history'):
+            console.history.append(f"<span style='color:#ff5555;'>{msg}</span>")
+            console.history.moveCursor(QtGui.QTextCursor.End)
+        else:
+            App.Console.PrintError(msg + "\n")
+
+
 def _is_classiccad_active():
     try:
         wb = Gui.activeWorkbench()
@@ -141,9 +238,76 @@ def _remove_task_panel_confirm_filters(console):
             pass
 
 
+def _task_panel_input_has_focus():
+    toolbar = getattr(Gui, 'draftToolBar', None)
+    focus_widget = QtWidgets.QApplication.focusWidget()
+    if not toolbar or not focus_widget:
+        return False
+
+    for widget in _iter_task_panel_confirm_widgets(toolbar):
+        try:
+            if focus_widget is widget or widget.isAncestorOf(focus_widget):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _console_typing_expected():
+    console = getattr(Gui, 'classic_console', None)
+    if not console or not _is_classiccad_active():
+        return False
+
+    if _task_panel_input_has_focus():
+        return False
+
+    focus_widget = QtWidgets.QApplication.focusWidget()
+    if focus_widget not in (None, console.input) and isinstance(
+        focus_widget,
+        (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox),
+    ):
+        return False
+
+    if getattr(console, '_zoom_mode_active', False):
+        return True
+    if _handler_active():
+        return True
+
+    try:
+        return bool(console.input.text())
+    except Exception:
+        return False
+
+
+def _restore_console_focus():
+    console = getattr(Gui, 'classic_console', None)
+    if not console or not _console_typing_expected():
+        return False
+
+    try:
+        if QtWidgets.QApplication.focusWidget() is console.input:
+            return True
+        console.input.setFocus(QtCore.Qt.OtherFocusReason)
+        console.input.deselect()
+        return True
+    except Exception:
+        return False
+
+
+def _schedule_console_focus_restore(delay=0):
+    console = getattr(Gui, 'classic_console', None)
+    if not console or not _console_typing_expected():
+        return False
+
+    QtCore.QTimer.singleShot(max(0, int(delay)), _restore_console_focus)
+    return True
+
+
 def _handler_active():
     """True if any custom interactive handler is running."""
     if hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler:
+        return True
+    if hasattr(Gui, 'ccad_offset_handler') and Gui.ccad_offset_handler:
         return True
     if hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler:
         return True
@@ -166,7 +330,6 @@ _LENGTH_FOCUS_COMMANDS = {
     'Draft_Line',
     'Draft_Wire',
     'Draft_Rectangle',
-    'Draft_Offset',
     'MOVE_CCAD',
     'COPY_CCAD',
     'MIRROR_CCAD',
@@ -211,12 +374,17 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         self.shortcuts = {
             'L': 'LINE',
+            'B': 'BLOCK',
+            'BL': 'BLOCK',
             'C': 'CIRCLE',
             'A': 'ARC',
             'BR': 'BREAK',
+            'CL': 'CLONE',
             'REC': 'RECTANG',
             'POL': 'POLYGON',
             'EL': 'ELLIPSE',
+            'I': 'INSERT',
+            'IN': 'INSERT',
             'PL': 'PLINE',
             'PO': 'POINT',
             'SPL': 'SPLINE',
@@ -252,7 +420,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'OS': 'OSNAP',
             'OT': 'OTRACK',
             'Z': 'ZOOM',
-            'ZE': 'ZOOM',
+            'ZE': 'ZOOMEXTENTS',
+            'ZO': 'ZOOMOBJECT',
+            'ZW': 'ZOOMWINDOW',
             'CHA': 'CHAMFER',
             'RR': 'RELOAD',
             'RE': 'REGEN',
@@ -263,12 +433,15 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         self.commands = {
             'LINE': 'Draft_Line',
+            'BLOCK': 'BLOCK_CCAD',
             'CIRCLE': 'Draft_Circle',
             'ARC': 'Draft_Arc',
             'BREAK': 'Draft_Split',
+            'CLONE': 'Draft_Clone',
             'RECTANG': 'Draft_Rectangle',
             'POLYGON': 'Draft_Polygon',
             'ELLIPSE': 'Draft_Ellipse',
+            'INSERT': 'Std_LinkMake',
             'PLINE': 'Draft_Wire',
             'POINT': 'Draft_Point',
             'MOVE': 'MOVE_CCAD',
@@ -279,7 +452,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'STRETCH': 'STRETCH_CCAD',
             'TRIM': 'TRIM_CCAD',
             'EXTEND': 'EXTEND_CCAD',
-            'OFFSET': 'Draft_Offset',
+            'OFFSET': 'OFFSET_CCAD',
             'FILLET': 'FILLET_CCAD',
             'ARRAY': 'Draft_Array',
             'ERASE': 'Std_Delete',
@@ -302,6 +475,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'OSNAP': 'OSNAP',
             'OTRACK': 'OTRACK',
             'ZOOM': 'ZOOM_CCAD',
+            'ZOOMEXTENTS': 'ZOOM_EXTENTS_CCAD',
+            'ZOOMOBJECT': 'ZOOM_OBJECT_CCAD',
+            'ZOOMWINDOW': 'ZOOM_WINDOW_CCAD',
             'CHAMFER': 'CHAMFER_CCAD',
             'RELOAD': 'RELOAD_CCAD',
             'REGEN': 'REGEN_CCAD',
@@ -310,6 +486,11 @@ class ClassicConsole(QtWidgets.QDockWidget):
             'XLINEV': 'XLINEV_CCAD',
             'SPLINE': 'SPLINE_CCAD',
         }
+
+        self._zoom_mode_active = False
+        self._zoom_drag_origin = None
+        self._zoom_window_only = False
+        self._zoom_band = None
 
         self.last_command = None
         self._task_panel_key_filter = _TaskPanelConfirmFilter(self, self)
@@ -580,13 +761,154 @@ class ClassicConsole(QtWidgets.QDockWidget):
         QtWidgets.QApplication.postEvent(active_dialog or toolbar or self, enter)
         return True
 
+    def _ensure_zoom_band(self):
+        viewport = ccad_cmd_xline._get_viewport()
+        if not viewport:
+            return None
+        if self._zoom_band is None or self._zoom_band.parent() is not viewport:
+            self._zoom_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, viewport)
+            self._zoom_band.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            self._zoom_band.setStyleSheet(
+                'QRubberBand {'
+                'border: 1px solid rgba(90, 210, 255, 220); '
+                'background-color: rgba(90, 210, 255, 35);'
+                '}'
+            )
+        return self._zoom_band
+
+    def _clear_zoom_band(self):
+        if self._zoom_band is not None:
+            try:
+                self._zoom_band.hide()
+            except Exception:
+                pass
+
+    def _cancel_zoom_mode(self, announce=False):
+        self._zoom_mode_active = False
+        self._zoom_window_only = False
+        self._zoom_drag_origin = None
+        self._clear_zoom_band()
+        if announce:
+            self.history.append("<span style='color:#aaa;'>ZOOM: Cancelled</span>")
+            self.history.moveCursor(QtGui.QTextCursor.End)
+
+    def _start_zoom_mode(self, window_only=False):
+        self._zoom_mode_active = True
+        self._zoom_window_only = bool(window_only)
+        self._zoom_drag_origin = None
+        self._clear_zoom_band()
+        prompt = 'ZOOM: Drag a window or enter [Extents/Object]' if not window_only else 'ZOOM Window: Click and drag to zoom'
+        self.history.append(f"<span style='color:#aaa;'>{prompt}</span>")
+        self.history.moveCursor(QtGui.QTextCursor.End)
+        _restore_console_focus()
+
+    def _handle_zoom_input(self):
+        raw_text = self.input.text().strip()
+        text = raw_text.upper()
+        self.input.clear()
+
+        if not text:
+            if self._zoom_window_only:
+                self.history.append("<span style='color:#aaa;'>ZOOM Window: Click and drag to zoom</span>")
+            else:
+                self.history.append("<span style='color:#aaa;'>ZOOM: Drag a window or enter [Extents/Object]</span>")
+            self.history.moveCursor(QtGui.QTextCursor.End)
+            return True
+
+        token = text.split()[0]
+        if token in ('E', 'EXTENTS'):
+            self._cancel_zoom_mode()
+            _zoom_extents()
+            return True
+        if token in ('O', 'OBJ', 'OBJECT'):
+            self._cancel_zoom_mode()
+            _zoom_selection(self)
+            return True
+        if token in ('W', 'WINDOW'):
+            self._zoom_window_only = True
+            self.history.append("<span style='color:#aaa;'>ZOOM Window: Click and drag to zoom</span>")
+            self.history.moveCursor(QtGui.QTextCursor.End)
+            return True
+
+        self.history.append("<span style='color:#ff5555;'>ZOOM: Enter Extents, Object, or drag a window</span>")
+        self.history.moveCursor(QtGui.QTextCursor.End)
+        return True
+
+    def _zoom_event_pos(self, obj, event):
+        viewport = ccad_cmd_xline._get_viewport()
+        if not viewport:
+            return None, None
+
+        global_pos = None
+        try:
+            if hasattr(event, 'globalPosition'):
+                global_pos = event.globalPosition().toPoint()
+            elif hasattr(event, 'globalPos'):
+                global_pos = event.globalPos()
+        except Exception:
+            global_pos = None
+
+        if global_pos is not None:
+            pos = viewport.mapFromGlobal(global_pos)
+        elif obj is viewport:
+            try:
+                pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+            except Exception:
+                pos = None
+        else:
+            pos = None
+
+        if pos is None:
+            return viewport, None
+
+        try:
+            if not viewport.rect().contains(pos):
+                return viewport, None
+        except Exception:
+            return viewport, None
+        return viewport, QtCore.QPoint(pos)
+
+    def _apply_zoom_window(self, viewport, start_pos, end_pos):
+        if viewport is None or start_pos is None or end_pos is None:
+            return False
+
+        if (start_pos - end_pos).manhattanLength() < 6:
+            return False
+
+        try:
+            raw_start = ccad_cmd_xline._qpoint_to_raw(start_pos, viewport)
+            raw_end = ccad_cmd_xline._qpoint_to_raw(end_pos, viewport)
+            xmin, xmax = sorted((int(raw_start[0]), int(raw_end[0])))
+            ymin, ymax = sorted((int(raw_start[1]), int(raw_end[1])))
+            view = Gui.activeView()
+            if view and hasattr(view, 'boxZoom'):
+                view.boxZoom(xmin, ymin, xmax, ymax)
+                return True
+        except Exception:
+            pass
+
+        try:
+            Gui.runCommand('Std_ViewBoxZoom', 0)
+            return True
+        except Exception:
+            return False
+
     # ── command dispatch ──────────────────────
 
     def execute(self, force_repeat=False):
+        if self._zoom_mode_active:
+            self._handle_zoom_input()
+            return
+
         # If a custom handler (XLINE, etc.) owns the input, delegate to it
         handler = getattr(Gui, 'ccad_xline_handler', None)
         if handler and hasattr(handler, '_on_input'):
             handler._on_input()
+            return
+
+        offset = getattr(Gui, 'ccad_offset_handler', None)
+        if offset and hasattr(offset, '_on_input'):
+            offset._on_input()
             return
         
         spline = getattr(Gui, 'ccad_spline_handler', None)
@@ -679,12 +1001,17 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ccad_cmd_join.run(self)
             return
 
+        if freecad_cmd == 'BLOCK_CCAD':
+            _make_block(self)
+            return
+
         # ── Auto-deselect before creation commands (not modify commands) ──
         _keep_sel = ('REGEN_CCAD', 'RELOAD_CCAD', 'JOIN_CCAD', 'EXPLODE_CCAD',
                      'MOVE_CCAD', 'COPY_CCAD', 'TRIM_CCAD', 'EXTEND_CCAD',
                      'STRETCH_CCAD', 'HATCH_CCAD', 'Draft_Split',
                      'FILLET_CCAD', 'Draft_Rotate', 'Draft_Scale',
-                     'MIRROR_CCAD', 'Draft_Mirror', 'Draft_Offset', 'Std_Delete', 'Std_Undo',
+                     'MIRROR_CCAD', 'Draft_Mirror', 'Draft_Offset', 'OFFSET_CCAD', 'BLOCK_CCAD', 'Draft_Clone', 'Std_LinkMake', 'Std_Delete', 'Std_Undo',
+                     'ZOOM_EXTENTS_CCAD', 'ZOOM_OBJECT_CCAD', 'ZOOM_WINDOW_CCAD',
                      'LAYOFF', 'LAYON', 'LAYISO', 'LAYUNISO',
                      'OSNAP', 'OTRACK', 'ZOOM_CCAD', 'CHAMFER_CCAD', 'MATCHPROP_CCAD',
                      'Std_Redo')
@@ -705,6 +1032,10 @@ class ClassicConsole(QtWidgets.QDockWidget):
         if freecad_cmd in ('XLINE_CCAD', 'XLINEH_CCAD', 'XLINEV_CCAD'):
             opt = {'XLINE_CCAD': None, 'XLINEH_CCAD': 'H', 'XLINEV_CCAD': 'V'}[freecad_cmd]
             ccad_cmd_xline.run(self, opt)
+            return
+
+        if freecad_cmd == 'OFFSET_CCAD':
+            ccad_cmd_offset.run(self)
             return
 
         # ── UNDO / REDO — exit any transient Draft edit state first ──
@@ -830,7 +1161,19 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
         # ── ZOOM (extents) ──
         if freecad_cmd == 'ZOOM_CCAD':
+            self._start_zoom_mode(window_only=False)
+            return
+
+        if freecad_cmd == 'ZOOM_EXTENTS_CCAD':
             _zoom_extents()
+            return
+
+        if freecad_cmd == 'ZOOM_OBJECT_CCAD':
+            _zoom_selection(self)
+            return
+
+        if freecad_cmd == 'ZOOM_WINDOW_CCAD':
+            self._start_zoom_mode(window_only=True)
             return
 
         # ── CHAMFER ──
@@ -885,7 +1228,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
 
     def _cleanup_handlers(self):
         """Clean up any active interactive handlers."""
-        for attr in ('ccad_xline_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler', 'ccad_hatch_handler', 'ccad_layoff_handler', 'ccad_matchprop_handler', 'ccad_chamfer_handler'):
+        for attr in ('ccad_xline_handler', 'ccad_offset_handler', 'ccad_trim_handler', 'ccad_fillet_handler', 'ccad_spline_handler', 'ccad_stretch_handler', 'ccad_hatch_handler', 'ccad_layoff_handler', 'ccad_matchprop_handler', 'ccad_chamfer_handler'):
             handler = getattr(Gui, attr, None)
             if not handler:
                 continue
@@ -902,6 +1245,7 @@ class ClassicConsole(QtWidgets.QDockWidget):
             ('ccad_trim_handler', 'TRIM/EXTEND'),
             ('ccad_fillet_handler', 'FILLET'),
             ('ccad_xline_handler', 'XLINE'),
+            ('ccad_offset_handler', 'OFFSET'),
             ('ccad_spline_handler', 'SPLINE'),
             ('ccad_stretch_handler', 'STRETCH'),
             ('ccad_hatch_handler', 'HATCH'),
@@ -1076,6 +1420,40 @@ class ClassicConsole(QtWidgets.QDockWidget):
     # ── app-level event filter ────────────────
 
     def eventFilter(self, obj, event):
+        if self._zoom_mode_active:
+            if event.type() == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Escape:
+                self._cancel_zoom_mode(announce=True)
+                return True
+
+            if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+                viewport, pos = self._zoom_event_pos(obj, event)
+                if viewport is not None and pos is not None:
+                    self._zoom_drag_origin = pos
+                    band = self._ensure_zoom_band()
+                    if band is not None:
+                        band.setGeometry(QtCore.QRect(pos, pos).normalized())
+                        band.show()
+                        band.raise_()
+                    return True
+
+            if event.type() == QtCore.QEvent.MouseMove and self._zoom_drag_origin is not None:
+                viewport, pos = self._zoom_event_pos(obj, event)
+                if viewport is not None and pos is not None:
+                    band = self._ensure_zoom_band()
+                    if band is not None:
+                        band.setGeometry(QtCore.QRect(self._zoom_drag_origin, pos).normalized())
+                    return True
+
+            if event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton and self._zoom_drag_origin is not None:
+                viewport, pos = self._zoom_event_pos(obj, event)
+                start_pos = QtCore.QPoint(self._zoom_drag_origin)
+                end_pos = QtCore.QPoint(pos) if pos is not None else QtCore.QPoint(start_pos)
+                self._zoom_drag_origin = None
+                self._clear_zoom_band()
+                if self._apply_zoom_window(viewport, start_pos, end_pos):
+                    self._cancel_zoom_mode(announce=False)
+                return True
+
         if event.type() == QtCore.QEvent.ShortcutOverride and event.key() == QtCore.Qt.Key_Escape:
             if ccad_selection.force_cancel_interaction(console=self, clear_console_input=True, log=True):
                 event.accept()
@@ -1155,6 +1533,9 @@ class ClassicConsole(QtWidgets.QDockWidget):
 class CCADFocusStealer(QtCore.QObject):
     """Κλέβει το focus από το Task Panel πριν προλάβει να καταπιεί το πλήκτρο."""
     def eventFilter(self, obj, event):
+        if event.type() in (QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.Wheel, QtCore.QEvent.WindowActivate):
+            _schedule_console_focus_restore()
+
         # Πιάνουμε το γεγονός στο στάδιο του ShortcutOverride (πριν το KeyPress)
         if event.type() == QtCore.QEvent.ShortcutOverride:
             key = event.key()
@@ -1171,6 +1552,8 @@ class CCADFocusStealer(QtCore.QObject):
                 
                 # Αν τρέχουν τα εργαλεία μας, ρίχνουμε το focus βίαια στην κονσόλα!
                 if spline_active or xline_active or trim_active or fillet_active or hatch_active or layoff_active or matchprop_active or chamfer_active:
+                    if _task_panel_input_has_focus():
+                        return False
                     if hasattr(Gui, "classic_console"):
                         cmd_input = Gui.classic_console.input
                         if QtWidgets.QApplication.focusWidget() != cmd_input:
@@ -1211,26 +1594,20 @@ def setup():
         if hasattr(Gui, "classic_console") and fw == Gui.classic_console.input:
             return
 
-        is_letter = char.isalpha()
+        if fw not in (None, getattr(getattr(Gui, 'classic_console', None), 'input', None)) and isinstance(
+            fw,
+            (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox),
+        ):
+            return
 
-        # Εξαίρεση: Αν τρέχουν τα εργαλεία μας
-        handler_running = (hasattr(Gui, 'ccad_spline_handler') and Gui.ccad_spline_handler) or \
-                          (hasattr(Gui, 'ccad_xline_handler') and Gui.ccad_xline_handler) or \
-                          (hasattr(Gui, 'ccad_trim_handler') and Gui.ccad_trim_handler) or \
-                          (hasattr(Gui, 'ccad_fillet_handler') and Gui.ccad_fillet_handler) or \
-                          (hasattr(Gui, 'ccad_hatch_handler') and Gui.ccad_hatch_handler) or \
-                          (hasattr(Gui, 'ccad_layoff_handler') and Gui.ccad_layoff_handler) or \
-                          (hasattr(Gui, 'ccad_matchprop_handler') and Gui.ccad_matchprop_handler) or \
-                          (hasattr(Gui, 'ccad_chamfer_handler') and Gui.ccad_chamfer_handler)
+        handler_running = _handler_active() or bool(
+            hasattr(Gui, "classic_console") and getattr(Gui.classic_console, '_zoom_mode_active', False)
+        )
 
-        if handler_running and is_letter and char.upper() not in ('X', 'Y', 'Z'):
+        if handler_running and (not char.isalpha() or char.upper() not in ('X', 'Y', 'Z')):
             if hasattr(Gui, "classic_console"):
                 Gui.classic_console.input.setFocus()
                 Gui.classic_console.input.insert(char)
-            return
-
-        # Native FreeCAD fields
-        if isinstance(fw, (QtWidgets.QLineEdit, QtWidgets.QDoubleSpinBox, QtWidgets.QSpinBox)):
             return
 
         if _handler_active():
