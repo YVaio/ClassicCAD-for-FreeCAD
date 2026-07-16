@@ -12,6 +12,9 @@ _MIN_BOX_DRAG_PX = 4
 # _MIN_BOX_DRAG_PX within this window, treat it as AutoCAD's "click empty
 # space to deselect" instead of waiting forever for a second point.
 _BOX_ARM_GRACE_MS = 400
+# Native rubber-band mode is inconsistent across FreeCAD builds and can leave
+# transient stuck states; keep ClassicCAD box selection custom-driven.
+_USE_NATIVE_BOX = False
 
 _ORIGINAL_SELECTION_PREFS = {}
 _HANDLER_SPECS = (
@@ -439,6 +442,7 @@ class CCADSelectionLogic(QtCore.QObject):
         self._native_box_via_command = False
         self._arm_token = 0
         self._pre_box_selection = []
+        self._last_box_finish_at = 0.0
         try:
             self.viewport.installEventFilter(self)
         except Exception:
@@ -503,6 +507,11 @@ class CCADSelectionLogic(QtCore.QObject):
             return None
 
     def _start_native_box_mode(self, qpos):
+        if not _USE_NATIVE_BOX:
+            self._native_box_active = False
+            self._clear_native_command_tracking()
+            return True
+
         self._clear_native_command_tracking()
         viewer = self._get_viewer()
         if viewer:
@@ -538,9 +547,10 @@ class CCADSelectionLogic(QtCore.QObject):
             Gui.runCommand('Std_BoxSelection', 0)
             self._native_box_via_command = True
         except Exception:
+            # Keep running in custom-only mode when native box cannot start.
             self._native_box_active = False
             self._clear_native_command_tracking()
-            return False
+            return True
 
         started = self._send_native_selection_event('down', qpos)
         self._native_box_active = bool(started)
@@ -550,6 +560,8 @@ class CCADSelectionLogic(QtCore.QObject):
             except Exception:
                 pass
             self._clear_native_command_tracking()
+            # Native command path failed to arm: continue in custom-only mode.
+            return True
         return started
 
     def _send_native_escape_event(self):
@@ -577,6 +589,11 @@ class CCADSelectionLogic(QtCore.QObject):
             return False
 
     def _stop_native_box_mode(self, abort=False):
+        if not _USE_NATIVE_BOX:
+            self._native_box_active = False
+            self._clear_native_command_tracking()
+            return
+
         via_command = self._native_box_via_command
         self._native_box_active = False
         self._clear_native_command_tracking()
@@ -593,13 +610,14 @@ class CCADSelectionLogic(QtCore.QObject):
         except Exception:
             pass
 
-        if abort and via_command:
+        if via_command:
             try:
                 self._send_native_escape_event()
             except Exception:
                 pass
 
     def cancel_box(self):
+        self._last_box_finish_at = time.time()
         self.state = 0
         self.start_pos = None
         self.current_pos = None
@@ -732,6 +750,40 @@ class CCADSelectionLogic(QtCore.QObject):
             pass
         return ""
 
+    def _has_pickable_at_pos(self, pos):
+        # Start box selection only on empty space; object clicks should keep
+        # FreeCAD's normal single-click selection behavior.
+        if self._current_preselection_name():
+            return True
+
+        try:
+            view = Gui.activeView()
+            if not view:
+                return False
+
+            if hasattr(pos, 'x') and hasattr(pos, 'y'):
+                qpos = QtCore.QPoint(int(pos.x()), int(pos.y()))
+                raw_pos = self._qpoint_to_raw(qpos)
+            else:
+                raw_pos = (int(pos[0]), int(pos[1]))
+
+            infos = view.getObjectsInfo(raw_pos)
+            if not infos:
+                return False
+            if isinstance(infos, dict):
+                infos = [infos]
+
+            for info in infos:
+                try:
+                    if info.get('Object') or info.get('ParentObject'):
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return False
+
     def _as_qpoint(self, pos):
         if hasattr(pos, 'x') and hasattr(pos, 'y'):
             return QtCore.QPoint(int(pos.x()), int(pos.y()))
@@ -821,12 +873,22 @@ class CCADSelectionLogic(QtCore.QObject):
             pass
         if self.overlay and self.start_pos is not None:
             self.overlay.set_rect(self.start_pos, qpos)
+        if self._native_box_active:
+            try:
+                self._send_native_selection_event('move', qpos)
+            except Exception:
+                pass
 
     def _finish_box(self, end_pos):
         qpos = self._as_qpoint(end_pos)
         self._update_box(qpos)
 
         self._suppress_qt_until = time.time() + 0.03
+        if self._native_box_active:
+            try:
+                self._send_native_selection_event('up', qpos)
+            except Exception:
+                pass
         # Stop native rubber-band visuals first, then override with our
         # custom window/crossing semantics (always, not only as fallback).
         self._stop_native_box_mode(abort=False)
@@ -836,6 +898,7 @@ class CCADSelectionLogic(QtCore.QObject):
         self.start_pos = None
         self.current_pos = None
         self._preview_names = []
+        self._last_box_finish_at = time.time()
         if self.overlay:
             self.overlay.clear()
 
@@ -889,7 +952,7 @@ class CCADSelectionLogic(QtCore.QObject):
             if state == "DOWN":
                 if self.state == 1:
                     return
-                if self._current_preselection_name():
+                if self._has_pickable_at_pos(pos):
                     return
                 self._start_box(pos)
                 return
@@ -1243,47 +1306,23 @@ class CCADSelectionLogic(QtCore.QObject):
 
         is_crossing = self.current_pos.x() < self.start_pos.x()
 
-        label_map = {}
-        try:
-            for obj in doc.Objects:
-                label_map[obj.Label] = obj.Name
-        except Exception:
-            pass
-
         proj = self._get_projection()
         final_names = []
-        native_names = []
-
-        try:
-            native_names = [
-                obj.Name for obj in Gui.Selection.getSelection()
-                if getattr(obj, 'Document', None) == doc
-            ]
-        except Exception:
-            native_names = []
 
         if is_crossing:
-            object_names = set(native_names)
-            object_names.update(self._pick_objects_in_rect(qt_rect))
-            for name in sorted(object_names):
-                real_name = name
-                if not doc.getObject(real_name):
-                    real_name = label_map.get(name, name)
-                if doc.getObject(real_name):
-                    final_names.append(real_name)
+            final_names = sorted(self._pick_objects_in_rect(qt_rect))
         else:
-            if native_names and proj is not None:
-                for name in native_names:
-                    obj = doc.getObject(name)
-                    if obj and self._object_fully_inside_qrect(obj, qt_rect, proj):
-                        final_names.append(name)
-            if not final_names:
+            if proj is not None:
                 final_names, _ = self._blue_window_candidate_names(qt_rect, doc, proj)
+            if not final_names:
+                # Fallback for builds/views where projection is unavailable:
+                # prefer returning a useful result over a null window pick.
+                final_names = sorted(self._pick_objects_in_rect(qt_rect))
 
         final_names = list(dict.fromkeys(final_names))
 
-        # Apply immediately, then reinforce once more a moment later.
-        # This is more stable across slow/medium/fast second-click timing.
+        # Keep box picks from auto-opening Draft_Edit grips instantly, then
+        # reopen them once the final selection has settled.
         self._apply_selection_names(list(final_names), reopen_grips=False)
         QtCore.QTimer.singleShot(80, lambda names=list(final_names): self._apply_selection_names(names, reopen_grips=True))
 
